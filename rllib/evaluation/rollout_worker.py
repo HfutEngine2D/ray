@@ -678,14 +678,16 @@ class RolloutWorker(ParallelIteratorWorker):
                 self.count_steps_by == "env_steps" else \
                 batch.agent_steps()
             batches.append(batch)
+        for batch in batches:
+            # Always do writes prior to compression for consistency and to allow
+            # for better compression inside the writer.
+            self.output_writer.write(batch)
+
         batch = batches[0].concat_samples(batches) if len(batches) > 1 else \
             batches[0]
 
         self.callbacks.on_sample_end(worker=self, samples=batch)
 
-        # Always do writes prior to compression for consistency and to allow
-        # for better compression inside the writer.
-        self.output_writer.write(batch)
 
         # Do off-policy estimation, if needed.
         if self.reward_estimators:
@@ -837,6 +839,7 @@ class RolloutWorker(ParallelIteratorWorker):
             logger.info(
                 "Training on concatenated sample batches:\n\n{}\n".format(
                     summarize(samples)))
+        # assert 1==2
         if isinstance(samples, MultiAgentBatch):
             info_out = {}
             to_fetch = {}

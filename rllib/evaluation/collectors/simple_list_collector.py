@@ -603,8 +603,7 @@ class SimpleListCollector(SampleCollector):
             check_dones: bool = False,
             build: bool = False) -> Union[None, SampleBatch, MultiAgentBatch]:
         episode_id = episode.episode_id
-        policy_collector_group = episode.batch_builder
-
+        policy_collector_group : "_PolicyCollectorGroup" = episode.batch_builder
         # TODO: (sven) Once we implement multi-agent communication channels,
         #  we have to resolve the restriction of only sending other agent
         #  batches from the same policy to the postprocess methods.

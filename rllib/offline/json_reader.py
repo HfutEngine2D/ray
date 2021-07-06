@@ -5,6 +5,7 @@ import os
 import random
 from urllib.parse import urlparse
 
+from ray.rllib.utils.debug import summarize
 try:
     from smart_open import smart_open
 except ImportError:
@@ -95,11 +96,66 @@ class JsonReader(InputReader):
                 out.append(
                     self.default_policy.postprocess_trajectory(sub_batch))
             return SampleBatch.concat_samples(out)
-        else:
-            # TODO(ekl) this is trickier since the alignments between agent
-            #  trajectories in the episode are not available any more.
-            raise NotImplementedError(
-                "Postprocessing of multi-agent data not implemented yet.")
+        elif isinstance(batch, MultiAgentBatch):
+
+            from ray.rllib.evaluation.episode import MultiAgentEpisode
+            from ray.rllib.evaluation.sample_batch_builder import \
+                MultiAgentSampleBatchBuilder
+            from ray.rllib.evaluation.collectors.simple_list_collector import \
+                SimpleListCollector
+            sample_collector = SimpleListCollector(
+                self.ioctx.worker.policy_map,
+                False,
+                self.ioctx.config.get("callbacks")(),
+                False,
+                self.ioctx.config.get("rollout_fragment_length"),
+                count_steps_by=self.ioctx.config.get("multiagent")["count_steps_by"])
+            def get_batch_builder():
+                return None
+            def new_episode(env_id):
+                episode = MultiAgentEpisode(
+                    self.ioctx.worker.policy_map,
+                    self.ioctx.config.get("multiagent")["policy_mapping_fn"],
+                    get_batch_builder,
+                    self.default_policy,
+                    env_id=env_id)
+                return episode
+
+            active_episode = new_episode(0)
+            # logger.info(summarize())
+            # 应对多智能体的问题。就是两个策略批次。
+            for policy_id, policy_batch in batch.policy_batches.items():
+                # logger.info(policy_id)
+                for i in range(batch.env_steps()):
+                    if i==0:
+                        sample_collector.add_init_obs(active_episode, policy_batch.data["agent_index"][i], 0,
+                                                    policy_id, -1,
+                                                    policy_batch.data["obs"][0])
+                        continue
+
+                    # logger.info(MultiAgentBatch)
+                    values_dict = {
+                        "t": i-1,
+                        "env_id": 0,
+                        "agent_index": policy_batch.data["agent_index"][i],
+                        # Action (slot 0) taken at timestep t.
+                        "actions": policy_batch.data["actions"][i-1],
+                        # Reward received after taking a at timestep t.
+                        "rewards": policy_batch.data["rewards"][i],
+                        # After taking action=a, did we reach terminal?
+                        "dones": policy_batch.data["dones"][i],
+                        # Next observation.
+                        "new_obs": policy_batch.data["obs"][i],
+                    }
+                    sample_collector.add_action_reward_next_obs(
+                        active_episode.episode_id, policy_batch.data["agent_index"][i], 0, policy_id,
+                        policy_batch.data["dones"][i], values_dict)
+            postprocessed_batch = sample_collector.postprocess_episode(
+                active_episode,
+                is_done=True,
+                check_dones=False,
+                build=True)
+            return postprocessed_batch
 
     def _try_parse(self, line: str) -> SampleBatchType:
         line = line.strip()
