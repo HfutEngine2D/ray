@@ -182,6 +182,52 @@ def build_vtrace_loss(policy, model, dist_class, train_batch):
 
     return policy.loss.total_loss
 
+class fakeVTraceLoss:
+
+    def __init__(self,pi_loss, vf_loss, entropy):
+        self.pi_loss = pi_loss
+        self.vf_loss = vf_loss
+        self.total_loss = vf_loss + pi_loss
+        self.entropy = entropy
+        self.value_targets = torch.zeros_like(vf_loss)
+
+
+def marwil_loss(policy, model, dist_class, train_batch):
+    model_out, _ = model.from_batch(train_batch)
+    action_dist = dist_class(model_out, model)
+    state_values = model.value_function()
+    # advantages = train_batch[Postprocessing.ADVANTAGES]
+    advantages = 0
+    actions = train_batch[SampleBatch.ACTIONS]
+
+    # Advantage estimation.
+    adv = advantages - state_values
+    adv_squared = torch.mean(torch.pow(adv, 2.0))
+
+    # Value loss.
+    policy.v_loss = 0.5 * adv_squared
+
+    # Policy loss.
+    # Update averaged advantage norm.
+    policy.ma_adv_norm.add_(1e-6 * (adv_squared - policy.ma_adv_norm))
+    # Exponentially weighted advantages.
+    exp_advs = torch.exp(0 *
+                         (adv / (1e-8 + torch.pow(policy.ma_adv_norm, 0.5))))
+    # log\pi_\theta(a|s)
+    logprobs = action_dist.logp(actions)
+    policy.p_loss = -1.0 * torch.mean(exp_advs.detach() * logprobs)
+
+    # Combine both losses.
+    policy.total_loss = policy.p_loss + 1.0 * \
+        policy.v_loss
+
+    policy.loss = fakeVTraceLoss(policy.p_loss, policy.v_loss, action_dist.entropy())
+    # explained_var = explained_variance(advantages, state_values)
+    # policy.explained_variance = torch.mean(explained_var)
+
+    return policy.loss.total_loss
+
+
 
 def make_time_major(policy, seq_lens, tensor, drop_last=False):
     """Swaps batch and trajectory axis.
@@ -215,7 +261,7 @@ def make_time_major(policy, seq_lens, tensor, drop_last=False):
     # Swap B and T axes.
     res = torch.transpose(rs, 1, 0)
 
-    if drop_last:
+    if drop_last and len(res) > 1:
         return res[:-1]
     return res
 
@@ -257,12 +303,16 @@ def setup_mixins(policy, obs_space, action_space, config):
     EntropyCoeffSchedule.__init__(policy, config["entropy_coeff"],
                                   config["entropy_coeff_schedule"])
     LearningRateSchedule.__init__(policy, config["lr"], config["lr_schedule"])
+    # Create a var.
+    # policy.ma_adv_norm = torch.tensor(
+    #     [100.0], dtype=torch.float32, requires_grad=False)
 
 
 VTraceTorchPolicy = build_policy_class(
     name="VTraceTorchPolicy",
     framework="torch",
     loss_fn=build_vtrace_loss,
+    # loss_fn=marwil_loss,
     get_default_config=lambda: ray.rllib.agents.impala.impala.DEFAULT_CONFIG,
     stats_fn=stats,
     extra_grad_process_fn=apply_grad_clipping,
