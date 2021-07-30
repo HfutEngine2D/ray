@@ -131,15 +131,17 @@ class JsonReader(InputReader):
                         sample_collector.add_init_obs(active_episode, policy_batch.data["agent_index"][i], 0,
                                                     policy_id, -1,
                                                     policy_batch.data["obs"][0])
-                        continue
+                        # continue
 
                     # logger.info(MultiAgentBatch)
                     values_dict = {
-                        "t": i-1,
+                        "t": i,
                         "env_id": 0,
                         "agent_index": policy_batch.data["agent_index"][i],
                         # Action (slot 0) taken at timestep t.
-                        "actions": policy_batch.data["actions"][i-1],
+                        "actions": policy_batch.data["actions"][i],
+                        "action_logp": policy_batch.data["action_logp"][i],
+                        "action_dist_inputs": policy_batch.data["action_dist_inputs"][i],
                         # Reward received after taking a at timestep t.
                         "rewards": policy_batch.data["rewards"][i],
                         # After taking action=a, did we reach terminal?
@@ -150,11 +152,13 @@ class JsonReader(InputReader):
                     sample_collector.add_action_reward_next_obs(
                         active_episode.episode_id, policy_batch.data["agent_index"][i], 0, policy_id,
                         policy_batch.data["dones"][i], values_dict)
+            logger.info(self.cur_file)
             postprocessed_batch = sample_collector.postprocess_episode(
                 active_episode,
                 is_done=True,
                 check_dones=False,
                 build=True)
+            # logger.info(summarize(postprocessed_batch))
             return postprocessed_batch
 
     def _try_parse(self, line: str) -> SampleBatchType:
@@ -188,6 +192,7 @@ class JsonReader(InputReader):
 
     def _next_file(self) -> FileType:
         path = random.choice(self.files)
+        logger.info(path)
         if urlparse(path).scheme not in [""] + WINDOWS_DRIVES:
             if smart_open is None:
                 raise ValueError(
