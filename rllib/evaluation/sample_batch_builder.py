@@ -258,9 +258,11 @@ class MultiAgentSampleBatchBuilder:
 
         self.postprocess_batch_so_far(episode)
         policy_batches = {}
+        old_count = self.count
         for policy_id, builder in self.policy_builders.items():
             if builder.count > 0:
+                if old_count == 0:
+                    old_count = builder.count
                 policy_batches[policy_id] = builder.build_and_reset()
-        old_count = self.count
         self.count = 0
         return MultiAgentBatch.wrap_as_needed(policy_batches, old_count)
