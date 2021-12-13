@@ -14,7 +14,6 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import org.testng.Assert;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -29,11 +28,7 @@ public class FailureTest extends BaseTest {
     // Set one worker per process. Otherwise, if `badFunc2` and `slowFunc` run in the same
     // process, `sleep` will delay `System.exit`.
     System.setProperty("ray.job.num-java-workers-per-process", "1");
-  }
-
-  @AfterClass
-  public void tearDown() {
-    System.clearProperty("ray.job.num-java-workers-per-process");
+    System.setProperty("ray.raylet.startup-token", "0");
   }
 
   public static int badFunc() {
@@ -52,6 +47,10 @@ public class FailureTest extends BaseTest {
       throw new RuntimeException(e);
     }
     return 0;
+  }
+
+  public static int echo(int obj) {
+    return obj;
   }
 
   public static class BadActor {
@@ -86,13 +85,27 @@ public class FailureTest extends BaseTest {
     }
   }
 
+  private static void assertTaskFailedWithRayActorException(ObjectRef<?> objectRef) {
+    try {
+      objectRef.get();
+      Assert.fail("Task didn't fail.");
+    } catch (RayActorException e) {
+      Throwable rootCause = e;
+      while (rootCause.getCause() != null) {
+        rootCause = rootCause.getCause();
+      }
+      Assert.assertTrue(rootCause instanceof RuntimeException);
+      Assert.assertTrue(rootCause.getMessage().contains(EXCEPTION_MESSAGE));
+    }
+  }
+
   public void testNormalTaskFailure() {
     assertTaskFailedWithRayTaskException(Ray.task(FailureTest::badFunc).remote());
   }
 
   public void testActorCreationFailure() {
     ActorHandle<BadActor> actor = Ray.actor(BadActor::new, true).remote();
-    assertTaskFailedWithRayTaskException(actor.task(BadActor::badMethod).remote());
+    assertTaskFailedWithRayActorException(actor.task(BadActor::badMethod).remote());
   }
 
   public void testActorTaskFailure() {
@@ -175,5 +188,16 @@ public class FailureTest extends BaseTest {
             });
     Assert.assertEquals(ex3.getCause().getClass(), UnreconstructableException.class);
     Assert.assertEquals(((UnreconstructableException) ex3.getCause()).objectId, objectId);
+  }
+
+  public void testTaskChainWithException() {
+    ObjectRef<Integer> obj1 = Ray.task(FailureTest::badFunc).remote();
+    ObjectRef<Integer> obj2 = Ray.task(FailureTest::echo, obj1).remote();
+    RayTaskException ex = Assert.expectThrows(RayTaskException.class, () -> Ray.get(obj2));
+    Assert.assertTrue(ex.getCause() instanceof RayTaskException);
+    RayTaskException ex2 = (RayTaskException) ex.getCause();
+    Assert.assertTrue(ex2.getCause() instanceof RuntimeException);
+    RuntimeException ex3 = (RuntimeException) ex2.getCause();
+    Assert.assertEquals(EXCEPTION_MESSAGE, ex3.getMessage());
   }
 }

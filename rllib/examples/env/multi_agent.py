@@ -1,17 +1,17 @@
 import gym
+import random
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv, make_multi_agent
 from ray.rllib.examples.env.mock_env import MockEnv, MockEnv2
 from ray.rllib.examples.env.stateless_cartpole import StatelessCartPole
-from ray.rllib.utils.deprecation import deprecation_warning
+from ray.rllib.utils.deprecation import Deprecated
 
 
+@Deprecated(
+    old="ray.rllib.examples.env.multi_agent.make_multiagent",
+    new="ray.rllib.env.multi_agent_env.make_multi_agent",
+    error=False)
 def make_multiagent(env_name_or_creator):
-    deprecation_warning(
-        old="ray.rllib.examples.env.multi_agent.make_multiagent",
-        new="ray.rllib.env.multi_agent_env.make_multi_agent",
-        error=False,
-    )
     return make_multi_agent(env_name_or_creator)
 
 
@@ -87,6 +87,62 @@ class EarlyDoneMultiAgent(MultiAgentEnv):
         return obs, rew, done, info
 
 
+class FlexAgentsMultiAgent(MultiAgentEnv):
+    """Env of independent agents, each of which exits after n steps."""
+
+    def __init__(self):
+        self.agents = {}
+        self.agentID = 0
+        self.dones = set()
+        self.observation_space = gym.spaces.Discrete(2)
+        self.action_space = gym.spaces.Discrete(2)
+        self.resetted = False
+
+    def spawn(self):
+        # Spawn a new agent into the current episode.
+        agentID = self.agentID
+        self.agents[agentID] = MockEnv(25)
+        self.agentID += 1
+        return agentID
+
+    def reset(self):
+        self.agents = {}
+        self.spawn()
+        self.resetted = True
+        self.dones = set()
+
+        obs = {}
+        for i, a in self.agents.items():
+            obs[i] = a.reset()
+
+        return obs
+
+    def step(self, action_dict):
+        obs, rew, done, info = {}, {}, {}, {}
+        # Apply the actions.
+        for i, action in action_dict.items():
+            obs[i], rew[i], done[i], info[i] = self.agents[i].step(action)
+            if done[i]:
+                self.dones.add(i)
+
+        # Sometimes, add a new agent to the episode.
+        if random.random() > 0.75:
+            i = self.spawn()
+            obs[i], rew[i], done[i], info[i] = self.agents[i].step(action)
+            if done[i]:
+                self.dones.add(i)
+
+        # Sometimes, kill an existing agent.
+        if len(self.agents) > 1 and random.random() > 0.25:
+            keys = list(self.agents.keys())
+            key = random.choice(keys)
+            done[key] = True
+            del self.agents[key]
+
+        done["__all__"] = len(self.dones) == len(self.agents)
+        return obs, rew, done, info
+
+
 class RoundRobinMultiAgent(MultiAgentEnv):
     """Env of N independent agents, each of which exits after 5 steps.
 
@@ -144,6 +200,6 @@ class RoundRobinMultiAgent(MultiAgentEnv):
 
 MultiAgentCartPole = make_multi_agent("CartPole-v0")
 MultiAgentMountainCar = make_multi_agent("MountainCarContinuous-v0")
-MultiAgentPendulum = make_multi_agent("Pendulum-v0")
+MultiAgentPendulum = make_multi_agent("Pendulum-v1")
 MultiAgentStatelessCartPole = make_multi_agent(
     lambda config: StatelessCartPole(config))

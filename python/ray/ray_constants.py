@@ -9,7 +9,14 @@ logger = logging.getLogger(__name__)
 
 def env_integer(key, default):
     if key in os.environ:
-        return int(os.environ[key])
+        value = os.environ[key]
+        if value.isdigit():
+            return int(os.environ[key])
+
+        logger.debug(f"Found {key} in environment, but value must "
+                     f"be an integer. Got: {value}. Returning "
+                     f"provided default {default}.")
+        return default
     return default
 
 
@@ -27,19 +34,27 @@ DEFAULT_OBJECT_STORE_MAX_MEMORY_BYTES = 200 * 10**9
 # The default proportion of available memory allocated to the object store
 DEFAULT_OBJECT_STORE_MEMORY_PROPORTION = 0.3
 # The smallest cap on the memory used by the object store that we allow.
-# This must be greater than MEMORY_RESOURCE_UNIT_BYTES * 0.7
+# This must be greater than MEMORY_RESOURCE_UNIT_BYTES
 OBJECT_STORE_MINIMUM_MEMORY_BYTES = 75 * 1024 * 1024
 # The default maximum number of bytes that the non-primary Redis shards are
 # allowed to use unless overridden by the user.
 DEFAULT_REDIS_MAX_MEMORY_BYTES = 10**10
 # The smallest cap on the memory used by Redis that we allow.
 REDIS_MINIMUM_MEMORY_BYTES = 10**7
+# Above this number of bytes, raise an error by default unless the user sets
+# RAY_ALLOW_SLOW_STORAGE=1. This avoids swapping with large object stores.
+REQUIRE_SHM_SIZE_THRESHOLD = 10**10
 # If a user does not specify a port for the primary Ray service,
 # we attempt to start the service running at this port.
 DEFAULT_PORT = 6379
 
+RAY_ADDRESS_ENVIRONMENT_VARIABLE = "RAY_ADDRESS"
+RAY_NAMESPACE_ENVIRONMENT_VARIABLE = "RAY_NAMESPACE"
+RAY_RUNTIME_ENV_ENVIRONMENT_VARIABLE = "RAY_RUNTIME_ENV"
+
 DEFAULT_DASHBOARD_IP = "127.0.0.1"
 DEFAULT_DASHBOARD_PORT = 8265
+REDIS_KEY_DASHBOARD = "dashboard"
 PROMETHEUS_SERVICE_DISCOVERY_FILE = "prom_metrics_service_discovery.json"
 # Default resource requirements for actors when no resource requirements are
 # specified.
@@ -52,9 +67,14 @@ DEFAULT_ACTOR_CREATION_CPU_SPECIFIED = 1
 # Default number of return values for each actor method.
 DEFAULT_ACTOR_METHOD_NUM_RETURN_VALS = 1
 
+# Wait 30 seconds for client to reconnect after unexpected disconnection
+DEFAULT_CLIENT_RECONNECT_GRACE_PERIOD = 30
+
 # If a remote function or actor (or some other export) has serialized size
 # greater than this quantity, print an warning.
-PICKLE_OBJECT_WARNING_SIZE = 10**7
+FUNCTION_SIZE_WARN_THRESHOLD = 10**7
+FUNCTION_SIZE_ERROR_THRESHOLD = env_integer("FUNCTION_SIZE_ERROR_THRESHOLD",
+                                            (10**8))
 
 # If remote functions with the same source are imported this many times, then
 # print a warning.
@@ -63,17 +83,13 @@ DUPLICATE_REMOTE_FUNCTION_THRESHOLD = 100
 # The maximum resource quantity that is allowed. TODO(rkn): This could be
 # relaxed, but the current implementation of the node manager will be slower
 # for large resource quantities due to bookkeeping of specific resource IDs.
-MAX_RESOURCE_QUANTITY = 100000
+MAX_RESOURCE_QUANTITY = 100e12
 
 # Each memory "resource" counts as this many bytes of memory.
-MEMORY_RESOURCE_UNIT_BYTES = 50 * 1024 * 1024
+MEMORY_RESOURCE_UNIT_BYTES = 1
 
 # Number of units 1 resource can be subdivided into.
 MIN_RESOURCE_GRANULARITY = 0.0001
-
-# Fraction of plasma memory that can be reserved. It is actually 70% but this
-# is set to 69% to leave some headroom.
-PLASMA_RESERVABLE_MEMORY_FRACTION = 0.69
 
 
 def round_to_memory_units(memory_bytes, round_up):
@@ -116,7 +132,6 @@ REGISTER_REMOTE_FUNCTION_PUSH_ERROR = "register_remote_function"
 FUNCTION_TO_RUN_PUSH_ERROR = "function_to_run"
 VERSION_MISMATCH_PUSH_ERROR = "version_mismatch"
 CHECKPOINT_PUSH_ERROR = "checkpoint"
-REGISTER_ACTOR_PUSH_ERROR = "register_actor"
 WORKER_CRASH_PUSH_ERROR = "worker_crash"
 WORKER_DIED_PUSH_ERROR = "worker_died"
 WORKER_POOL_LARGE_ERROR = "worker_pool_large"
@@ -130,6 +145,8 @@ REPORTER_DIED_ERROR = "reporter_died"
 DASHBOARD_AGENT_DIED_ERROR = "dashboard_agent_died"
 DASHBOARD_DIED_ERROR = "dashboard_died"
 RAYLET_CONNECTION_ERROR = "raylet_connection_error"
+DETACHED_ACTOR_ANONYMOUS_NAMESPACE_ERROR = "detached_actor_anonymous_namespace"
+EXCESS_QUEUEING_WARNING = "excess_queueing_warning"
 
 # Used in gpu detection
 RESOURCE_CONSTRAINT_PREFIX = "accelerator_type:"
@@ -141,7 +158,10 @@ REPORTER_UPDATE_INTERVAL_MS = env_integer("REPORTER_UPDATE_INTERVAL_MS", 2500)
 
 # Number of attempts to ping the Redis server. See
 # `services.py:wait_for_redis_to_start`.
-START_REDIS_WAIT_RETRIES = env_integer("RAY_START_REDIS_WAIT_RETRIES", 12)
+START_REDIS_WAIT_RETRIES = env_integer("RAY_START_REDIS_WAIT_RETRIES", 16)
+
+# Only unpickle and run exported functions from the same job if it's true.
+ISOLATE_EXPORTS = env_bool("RAY_ISOLATE_EXPORTS", True)
 
 LOGGER_FORMAT = (
     "%(asctime)s\t%(levelname)s %(filename)s:%(lineno)s -- %(message)s")
@@ -150,12 +170,9 @@ LOGGER_LEVEL = "info"
 LOGGER_LEVEL_CHOICES = ["debug", "info", "warning", "error", "critical"]
 LOGGER_LEVEL_HELP = ("The logging level threshold, choices=['debug', 'info',"
                      " 'warning', 'error', 'critical'], default='info'")
-# Default param for RotatingFileHandler
-# maxBytes. 10G by default. We intentionally set the default value high
-# so that users who won't care don't know about the existence of this.
-LOGGING_ROTATE_BYTES = 10 * 1000 * 1000 * 1000
-# The default will grow logs up until 500GB without log loss.
-LOGGING_ROTATE_BACKUP_COUNT = 50  # backupCount
+
+LOGGING_ROTATE_BYTES = 512 * 1024 * 1024  # 512MB.
+LOGGING_ROTATE_BACKUP_COUNT = 5  # 5 Backup files at max.
 
 # Constants used to define the different process types.
 PROCESS_TYPE_REAPER = "reaper"
@@ -168,10 +185,11 @@ PROCESS_TYPE_DASHBOARD = "dashboard"
 PROCESS_TYPE_DASHBOARD_AGENT = "dashboard_agent"
 PROCESS_TYPE_WORKER = "worker"
 PROCESS_TYPE_RAYLET = "raylet"
-PROCESS_TYPE_PLASMA_STORE = "plasma_store"
 PROCESS_TYPE_REDIS_SERVER = "redis_server"
 PROCESS_TYPE_WEB_UI = "web_ui"
 PROCESS_TYPE_GCS_SERVER = "gcs_server"
+PROCESS_TYPE_PYTHON_CORE_WORKER_DRIVER = "python-core-driver"
+PROCESS_TYPE_PYTHON_CORE_WORKER = "python-core-worker"
 
 # Log file names
 MONITOR_LOG_FILE_NAME = f"{PROCESS_TYPE_MONITOR}.log"
@@ -194,6 +212,13 @@ WORKER_PROCESS_TYPE_RESTORE_WORKER_DELETE = (
     f"ray::DELETE_{WORKER_PROCESS_TYPE_RESTORE_WORKER_NAME}")
 
 LOG_MONITOR_MAX_OPEN_FILES = 200
+
+# Autoscaler events are denoted by the ":event_summary:" magic token.
+LOG_PREFIX_EVENT_SUMMARY = ":event_summary:"
+# Actor names are recorded in the logs with this magic token as a prefix.
+LOG_PREFIX_ACTOR_NAME = ":actor_name:"
+# Task names are recorded in the logs with this magic token as a prefix.
+LOG_PREFIX_TASK_NAME = ":task_name:"
 
 # The object metadata field uses the following format: It is a comma
 # separated list of fields. The first field is mandatory and is the
@@ -235,4 +260,38 @@ MACH_PAGE_SIZE_BYTES = 4096
 MAX_INT64_VALUE = 9223372036854775807
 
 # Object Spilling related constants
-DEFAULT_OBJECT_PREFIX = "ray_spilled_object"
+DEFAULT_OBJECT_PREFIX = "ray_spilled_objects"
+
+GCS_PORT_ENVIRONMENT_VARIABLE = "RAY_GCS_SERVER_PORT"
+
+HEALTHCHECK_EXPIRATION_S = os.environ.get("RAY_HEALTHCHECK_EXPIRATION_S", 10)
+
+# Filename of "shim process" that sets up Python worker environment.
+# Should be kept in sync with kSetupWorkerFilename in
+# src/ray/common/constants.h.
+SETUP_WORKER_FILENAME = "setup_worker.py"
+
+# Directory name where runtime_env resources will be created & cached.
+DEFAULT_RUNTIME_ENV_DIR_NAME = "runtime_resources"
+
+# Used to separate lines when formatting the call stack where an ObjectRef was
+# created.
+CALL_STACK_LINE_DELIMITER = " | "
+
+# The default gRPC max message size is 4 MiB, we use a larger number of 100 MiB
+# NOTE: This is equal to the C++ limit of (RAY_CONFIG::max_grpc_message_size)
+GRPC_CPP_MAX_MESSAGE_SIZE = 100 * 1024 * 1024
+
+# Internal kv namespaces
+KV_NAMESPACE_DASHBOARD = "dashboard"
+KV_NAMESPACE_SESSION = "session"
+KV_NAMESPACE_TRACING = "tracing"
+KV_NAMESPACE_PDB = "ray_pdb"
+KV_NAMESPACE_HEALTHCHECK = "healthcheck"
+KV_NAMESPACE_JOB = "job"
+# TODO: Set package for runtime env
+# We need to update ray client for this since runtime env use ray client
+# This might introduce some compatibility issues so leave it here for now.
+KV_NAMESPACE_PACKAGE = None
+KV_NAMESPACE_SERVE = "serve"
+KV_NAMESPACE_FUNCTION_TABLE = "fun"

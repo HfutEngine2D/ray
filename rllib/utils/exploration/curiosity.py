@@ -17,8 +17,8 @@ from ray.rllib.utils.exploration.exploration import Exploration
 from ray.rllib.utils.framework import try_import_tf, \
     try_import_torch
 from ray.rllib.utils.from_config import from_config
-from ray.rllib.utils.tf_ops import get_placeholder, one_hot as tf_one_hot
-from ray.rllib.utils.torch_ops import one_hot
+from ray.rllib.utils.tf_utils import get_placeholder, one_hot as tf_one_hot
+from ray.rllib.utils.torch_utils import one_hot
 from ray.rllib.utils.typing import FromConfigSpec, ModelConfigDict, TensorType
 
 tf1, tf, tfv = try_import_tf()
@@ -290,7 +290,7 @@ class Curiosity(Exploration):
                     dist_inputs, self.model, self.action_space.nvec)
             # Neg log(p); p=probability of observed action given the inverse-NN
             # predicted action distribution.
-            inverse_loss = -action_dist.logp(actions)
+            inverse_loss = -action_dist.logp(tf.convert_to_tensor(actions))
             inverse_loss = tf.reduce_mean(inverse_loss)
 
             # Calculate the ICM loss.

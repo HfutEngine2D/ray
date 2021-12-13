@@ -11,12 +11,13 @@ from ray.tune.suggest.suggestion import UNRESOLVED_SEARCH_SPACE, \
     UNDEFINED_METRIC_MODE, UNDEFINED_SEARCH_SPACE
 from ray.tune.suggest.variant_generator import parse_spec_vars
 from ray.tune.utils.util import unflatten_dict
-from zoopt import Solution, ValueType
 
 try:
     import zoopt
+    from zoopt import Solution, ValueType
 except ImportError:
     zoopt = None
+    Solution = ValueType = None
 
 from ray.tune.suggest import Searcher
 
@@ -198,8 +199,8 @@ class ZOOptSearch(Searcher):
 
         init_samples = None
         if self._points_to_evaluate:
-            logger.warning(
-                "`points_to_evaluate` seems to be ignored by ZOOpt.")
+            logger.warning("`points_to_evaluate` is ignored by ZOOpt in "
+                           "versions <= 0.4.1.")
             init_samples = [
                 Solution(x=tuple(point[dim] for dim in self._dim_keys))
                 for point in self._points_to_evaluate
@@ -213,11 +214,9 @@ class ZOOptSearch(Searcher):
                 parameter=par,
                 parallel_num=self.parallel_num,
                 **self.kwargs)
-            if init_samples:
-                self.optimizer.init_attribute()
 
     def set_search_properties(self, metric: Optional[str], mode: Optional[str],
-                              config: Dict) -> bool:
+                              config: Dict, **spec) -> bool:
         if self._dim_dict:
             return False
         space = self.convert_search_space(config)
@@ -278,14 +277,18 @@ class ZOOptSearch(Searcher):
         del self._live_trial_mapping[trial_id]
 
     def save(self, checkpoint_path: str):
-        trials_object = self.optimizer
-        with open(checkpoint_path, "wb") as output:
-            pickle.dump(trials_object, output)
+        save_object = self.__dict__
+        with open(checkpoint_path, "wb") as outputFile:
+            pickle.dump(save_object, outputFile)
 
     def restore(self, checkpoint_path: str):
-        with open(checkpoint_path, "rb") as input:
-            trials_object = pickle.load(input)
-        self.optimizer = trials_object
+        with open(checkpoint_path, "rb") as inputFile:
+            save_object = pickle.load(inputFile)
+        if not isinstance(save_object, dict):
+            # backwards compatibility
+            # Deprecate: 1.8
+            self.optimizer = save_object
+        self.__dict__.update(save_object)
 
     @staticmethod
     def convert_search_space(spec: Dict,
@@ -317,8 +320,8 @@ class ZOOptSearch(Searcher):
 
             elif isinstance(domain, Integer):
                 if isinstance(sampler, Uniform):
-                    return (ValueType.DISCRETE, [domain.lower, domain.upper],
-                            True)
+                    return (ValueType.DISCRETE,
+                            [domain.lower, domain.upper - 1], True)
 
             elif isinstance(domain, Categorical):
                 # Categorical variables would use ValueType.DISCRETE with

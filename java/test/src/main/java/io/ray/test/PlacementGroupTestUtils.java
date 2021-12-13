@@ -1,6 +1,7 @@
 package io.ray.test;
 
-import io.ray.api.Ray;
+import io.ray.api.PlacementGroups;
+import io.ray.api.options.PlacementGroupCreationOptions;
 import io.ray.api.placementgroup.PlacementGroup;
 import io.ray.api.placementgroup.PlacementStrategy;
 import java.util.ArrayList;
@@ -24,25 +25,32 @@ public class PlacementGroupTestUtils {
       bundle.put(resourceName, resourceSize);
       bundles.add(bundle);
     }
+    PlacementGroupCreationOptions.Builder builder =
+        new PlacementGroupCreationOptions.Builder().setBundles(bundles).setStrategy(strategy);
+    builder.setName(groupName);
 
-    return Ray.createPlacementGroup(groupName, bundles, strategy);
+    return PlacementGroups.createPlacementGroup(builder.build());
   }
 
   public static PlacementGroup createSpecifiedSimpleGroup(
-      String resourceName, int bundleSize, PlacementStrategy strategy, Double resourceSize) {
+      String resourceName,
+      int bundleSize,
+      PlacementStrategy strategy,
+      Double resourceSize,
+      boolean isGlobal) {
     return createNameSpecifiedSimpleGroup(
         resourceName, bundleSize, strategy, resourceSize, "unnamed_group");
   }
 
   public static PlacementGroup createSimpleGroup() {
-    return createSpecifiedSimpleGroup("CPU", 1, PlacementStrategy.PACK, 1.0);
+    return createSpecifiedSimpleGroup("CPU", 1, PlacementStrategy.PACK, 1.0, false);
   }
 
   public static void createBundleSizeInvalidGroup() {
-    createSpecifiedSimpleGroup("CPU", 0, PlacementStrategy.PACK, 1.0);
+    createSpecifiedSimpleGroup("CPU", 0, PlacementStrategy.PACK, 1.0, false);
   }
 
   public static void createBundleResourceInvalidGroup() {
-    createSpecifiedSimpleGroup("CPU", 1, PlacementStrategy.PACK, 0.0);
+    createSpecifiedSimpleGroup("CPU", 1, PlacementStrategy.PACK, 0.0, false);
   }
 }

@@ -1,6 +1,7 @@
 from sklearn import datasets
 from sklearn.model_selection import train_test_split
 
+from ray.tune.utils.placement_groups import PlacementGroupFactory
 from ray.util.xgboost import RayDMatrix, RayParams, train
 
 # __train_begin__
@@ -33,6 +34,19 @@ def train_model(config):
 # __train_end__
 
 
+# __load_begin__
+def load_best_model(best_logdir):
+    import xgboost as xgb
+    import os
+
+    best_bst = xgb.Booster()
+    best_bst.load_model(os.path.join(best_logdir, "model.xgb"))
+    return best_bst
+
+
+# __load_end__
+
+
 def main():
     # __tune_begin__
     from ray import tune
@@ -55,18 +69,25 @@ def main():
         metric="eval-error",
         mode="min",
         num_samples=4,
-        resources_per_trial={
-            "cpu": 1,
-            "extra_cpu": num_actors * num_cpus_per_actor
-        })
-
-    # Load the best model checkpoint
-    import xgboost as xgb
-    import os
+        resources_per_trial=PlacementGroupFactory([{
+            "CPU": 1.0
+        }] + [{
+            "CPU": float(num_cpus_per_actor)
+        }] * num_actors))
 
     # Load in the best performing model.
-    best_bst = xgb.Booster()
-    best_bst.load_model(os.path.join(analysis.best_logdir, "model.xgb"))
+    best_bst = load_best_model(analysis.best_logdir)
+
+    # Use the following code block instead if using Ray Client.
+    # import ray
+    # if ray.util.client.ray.is_connected():
+    #     # If using Ray Client best_logdir is a directory on the server.
+    #     # So we want to make sure we wrap model loading in a task.
+    #     remote_load_fn = ray.remote(load_best_model)
+    #     best_bst = ray.get(remote_load_fn.remote(analysis.best_logdir))
+
+    # Do something with the best model.
+    _ = best_bst
 
     accuracy = 1. - analysis.best_result["eval-error"]
     print(f"Best model parameters: {analysis.best_config}")

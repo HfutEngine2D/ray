@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "ray/gcs/gcs_server/gcs_resource_manager.h"
+
 #include <memory>
 
 #include "gtest/gtest.h"
-#include "ray/gcs/gcs_server/gcs_resource_manager.h"
+#include "ray/common/asio/instrumented_io_context.h"
 #include "ray/gcs/test/gcs_test_util.h"
 
 namespace ray {
@@ -26,10 +28,10 @@ class GcsResourceManagerTest : public ::testing::Test {
  public:
   GcsResourceManagerTest() {
     gcs_resource_manager_ =
-        std::make_shared<gcs::GcsResourceManager>(io_service_, nullptr, nullptr);
+        std::make_shared<gcs::GcsResourceManager>(io_service_, nullptr, nullptr, true);
   }
 
-  boost::asio::io_service io_service_;
+  instrumented_io_context io_service_;
   std::shared_ptr<gcs::GcsResourceManager> gcs_resource_manager_;
 };
 
@@ -37,7 +39,7 @@ TEST_F(GcsResourceManagerTest, TestBasic) {
   // Add node resources.
   auto node_id = NodeID::FromRandom();
   const std::string cpu_resource = "CPU";
-  std::unordered_map<std::string, double> resource_map;
+  absl::flat_hash_map<std::string, double> resource_map;
   resource_map[cpu_resource] = 10;
   ResourceSet resource_set(resource_map);
   gcs_resource_manager_->UpdateResourceCapacity(node_id, resource_map);
@@ -71,7 +73,7 @@ TEST_F(GcsResourceManagerTest, TestResourceUsageAPI) {
   rpc::ReportResourceUsageRequest report_request;
   (*report_request.mutable_resources()->mutable_resources_available())["CPU"] = 2;
   (*report_request.mutable_resources()->mutable_resources_total())["CPU"] = 2;
-  gcs_resource_manager_->UpdateNodeResourceUsage(node_id, report_request);
+  gcs_resource_manager_->UpdateNodeResourceUsage(node_id, report_request.resources());
 
   gcs_resource_manager_->HandleGetAllResourceUsage(get_all_request, &get_all_reply,
                                                    send_reply_callback);

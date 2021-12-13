@@ -13,11 +13,17 @@ from ray.rllib.models.tf.tf_modelv2 import TFModelV2
 from ray.rllib.models.tf.visionnet import VisionNetwork as MyVisionNetwork
 from ray.rllib.policy.sample_batch import DEFAULT_POLICY_ID
 from ray.rllib.utils.framework import try_import_tf
+from ray.rllib.utils.metrics.learner_info import LEARNER_INFO, \
+    LEARNER_STATS_KEY
 
 tf1, tf, tfv = try_import_tf()
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--run", type=str, default="DQN")  # Try PG, PPO, DQN
+parser.add_argument(
+    "--run",
+    type=str,
+    default="DQN",
+    help="The RLlib-registered algorithm to use.")
 parser.add_argument("--stop", type=int, default=200)
 parser.add_argument("--use-vision-network", action="store_true")
 parser.add_argument("--num-cpus", type=int, default=0)
@@ -84,7 +90,7 @@ class MyKerasQModel(DistributionalQTFModel):
             kernel_initializer=normc_initializer(1.0))(layer_1)
         self.base_model = tf.keras.Model(self.inputs, layer_out)
 
-    # Implement the core forward method
+    # Implement the core forward method.
     def forward(self, input_dict, state, seq_lens):
         model_out = self.base_model(input_dict["obs"])
         return model_out, state
@@ -105,9 +111,10 @@ if __name__ == "__main__":
 
     # Tests https://github.com/ray-project/ray/issues/7293
     def check_has_custom_metric(result):
-        r = result["result"]["info"]["learner"]
+        r = result["result"]["info"][LEARNER_INFO]
         if DEFAULT_POLICY_ID in r:
-            r = r[DEFAULT_POLICY_ID]
+            r = r[DEFAULT_POLICY_ID].get(LEARNER_STATS_KEY,
+                                         r[DEFAULT_POLICY_ID])
         assert r["model"]["foo"] == 42, result
 
     if args.run == "DQN":

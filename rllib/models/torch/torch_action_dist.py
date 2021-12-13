@@ -1,7 +1,7 @@
 import functools
 from math import log
 import numpy as np
-import tree
+import tree  # pip install dm_tree
 import gym
 
 from ray.rllib.models.action_dist import ActionDistribution
@@ -11,7 +11,6 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.numpy import SMALL_NUMBER, MIN_LOG_NN_OUTPUT, \
     MAX_LOG_NN_OUTPUT
 from ray.rllib.utils.spaces.space_utils import get_base_struct_from_space
-from ray.rllib.utils.torch_ops import atanh
 from ray.rllib.utils.typing import TensorType, List, Union, \
     Tuple, ModelConfigDict
 
@@ -89,8 +88,11 @@ class TorchMultiCategorical(TorchDistributionWrapper):
     """MultiCategorical distribution for MultiDiscrete action spaces."""
 
     @override(TorchDistributionWrapper)
-    def __init__(self, inputs: List[TensorType], model: TorchModelV2,
-                 input_lens: Union[List[int], np.ndarray, Tuple[int, ...]]):
+    def __init__(self,
+                 inputs: List[TensorType],
+                 model: TorchModelV2,
+                 input_lens: Union[List[int], np.ndarray, Tuple[int, ...]],
+                 action_space=None):
         super().__init__(inputs, model)
         # If input_lens is np.ndarray or list, force-make it a tuple.
         inputs_split = self.inputs.split(tuple(input_lens), dim=1)
@@ -98,23 +100,36 @@ class TorchMultiCategorical(TorchDistributionWrapper):
             torch.distributions.categorical.Categorical(logits=input_)
             for input_ in inputs_split
         ]
+        # Used in case we are dealing with an Int Box.
+        self.action_space = action_space
 
     @override(TorchDistributionWrapper)
     def sample(self) -> TensorType:
         arr = [cat.sample() for cat in self.cats]
-        self.last_sample = torch.stack(arr, dim=1)
-        return self.last_sample
+        sample_ = torch.stack(arr, dim=1)
+        if isinstance(self.action_space, gym.spaces.Box):
+            sample_ = torch.reshape(sample_,
+                                    [-1] + list(self.action_space.shape))
+        self.last_sample = sample_
+        return sample_
 
     @override(ActionDistribution)
     def deterministic_sample(self) -> TensorType:
         arr = [torch.argmax(cat.probs, -1) for cat in self.cats]
-        self.last_sample = torch.stack(arr, dim=1)
-        return self.last_sample
+        sample_ = torch.stack(arr, dim=1)
+        if isinstance(self.action_space, gym.spaces.Box):
+            sample_ = torch.reshape(sample_,
+                                    [-1] + list(self.action_space.shape))
+        self.last_sample = sample_
+        return sample_
 
     @override(TorchDistributionWrapper)
     def logp(self, actions: TensorType) -> TensorType:
         # # If tensor is provided, unstack it into list.
         if isinstance(actions, torch.Tensor):
+            if isinstance(self.action_space, gym.spaces.Box):
+                actions = torch.reshape(
+                    actions, [-1, int(np.product(self.action_space.shape))])
             actions = torch.unbind(actions, dim=1)
         logps = torch.stack(
             [cat.log_prob(act) for cat, act in zip(self.cats, actions)])
@@ -147,7 +162,17 @@ class TorchMultiCategorical(TorchDistributionWrapper):
     def required_model_output_shape(
             action_space: gym.Space,
             model_config: ModelConfigDict) -> Union[int, np.ndarray]:
-        return np.sum(action_space.nvec)
+        # Int Box.
+        if isinstance(action_space, gym.spaces.Box):
+            assert action_space.dtype.name.startswith("int")
+            low_ = np.min(action_space.low)
+            high_ = np.max(action_space.high)
+            assert np.all(action_space.low == low_)
+            assert np.all(action_space.high == high_)
+            np.product(action_space.shape) * (high_ - low_ + 1)
+        # MultiDiscrete space.
+        else:
+            return np.sum(action_space.nvec)
 
 
 class TorchDiagGaussian(TorchDistributionWrapper):
@@ -214,6 +239,8 @@ class TorchSquashedGaussian(TorchDistributionWrapper):
         assert np.all(np.less(low, high))
         self.low = low
         self.high = high
+        self.mean = mean
+        self.std = std
 
     @override(ActionDistribution)
     def deterministic_sample(self) -> TensorType:
@@ -224,6 +251,7 @@ class TorchSquashedGaussian(TorchDistributionWrapper):
     def sample(self) -> TensorType:
         # Use the reparameterization version of `dist.sample` to allow for
         # the results to be backprop'able e.g. in a loss term.
+
         normal_sample = self.dist.rsample()
         self.last_sample = self._squash(normal_sample)
         return self.last_sample
@@ -242,6 +270,14 @@ class TorchSquashedGaussian(TorchDistributionWrapper):
         log_prob = log_prob_gaussian - torch.sum(
             torch.log(1 - unsquashed_values_tanhd**2 + SMALL_NUMBER), dim=-1)
         return log_prob
+
+    def sample_logp(self):
+        z = self.dist.rsample()
+        actions = self._squash(z)
+        return actions, torch.sum(
+            self.dist.log_prob(z) -
+            torch.log(1 - actions * actions + SMALL_NUMBER),
+            dim=-1)
 
     @override(TorchDistributionWrapper)
     def entropy(self) -> TensorType:
@@ -263,7 +299,7 @@ class TorchSquashedGaussian(TorchDistributionWrapper):
         # Stabilize input to atanh.
         save_normed_values = torch.clamp(normed_values, -1.0 + SMALL_NUMBER,
                                          1.0 - SMALL_NUMBER)
-        unsquashed = atanh(save_normed_values)
+        unsquashed = torch.atanh(save_normed_values)
         return unsquashed
 
     @staticmethod

@@ -3,19 +3,19 @@ package io.ray.runtime.task;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import io.ray.api.BaseActorHandle;
+import io.ray.api.PlacementGroups;
 import io.ray.api.Ray;
 import io.ray.api.id.ActorId;
 import io.ray.api.id.ObjectId;
 import io.ray.api.id.PlacementGroupId;
 import io.ray.api.options.ActorCreationOptions;
 import io.ray.api.options.CallOptions;
+import io.ray.api.options.PlacementGroupCreationOptions;
 import io.ray.api.placementgroup.PlacementGroup;
-import io.ray.api.placementgroup.PlacementStrategy;
 import io.ray.runtime.actor.NativeActorHandle;
 import io.ray.runtime.functionmanager.FunctionDescriptor;
 import io.ray.runtime.placementgroup.PlacementGroupImpl;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
@@ -51,8 +51,7 @@ public class NativeTaskSubmitter implements TaskSubmitter {
       }
 
       if (StringUtils.isNotBlank(options.name)) {
-        Optional<BaseActorHandle> actor =
-            options.global ? Ray.getGlobalActor(options.name) : Ray.getActor(options.name);
+        Optional<BaseActorHandle> actor = Ray.getActor(options.name);
         Preconditions.checkArgument(
             !actor.isPresent(), String.format("Actor of name %s exists", options.name));
       }
@@ -90,14 +89,19 @@ public class NativeTaskSubmitter implements TaskSubmitter {
   }
 
   @Override
-  public PlacementGroup createPlacementGroup(
-      String name, List<Map<String, Double>> bundles, PlacementStrategy strategy) {
-    byte[] bytes = nativeCreatePlacementGroup(name, bundles, strategy.value());
+  public PlacementGroup createPlacementGroup(PlacementGroupCreationOptions creationOptions) {
+    if (StringUtils.isNotBlank(creationOptions.name)) {
+      PlacementGroup placementGroup = PlacementGroups.getPlacementGroup(creationOptions.name);
+      Preconditions.checkArgument(
+          placementGroup == null,
+          String.format("Placement group with name %s exists!", creationOptions.name));
+    }
+    byte[] bytes = nativeCreatePlacementGroup(creationOptions);
     return new PlacementGroupImpl.Builder()
         .setId(PlacementGroupId.fromBytes(bytes))
-        .setName(name)
-        .setBundles(bundles)
-        .setStrategy(strategy)
+        .setName(creationOptions.name)
+        .setBundles(creationOptions.bundles)
+        .setStrategy(creationOptions.strategy)
         .build();
   }
 
@@ -107,8 +111,8 @@ public class NativeTaskSubmitter implements TaskSubmitter {
   }
 
   @Override
-  public boolean waitPlacementGroupReady(PlacementGroupId id, int timeoutMs) {
-    return nativeWaitPlacementGroupReady(id.getBytes(), timeoutMs);
+  public boolean waitPlacementGroupReady(PlacementGroupId id, int timeoutSeconds) {
+    return nativeWaitPlacementGroupReady(id.getBytes(), timeoutSeconds);
   }
 
   private static native List<byte[]> nativeSubmitTask(
@@ -133,10 +137,10 @@ public class NativeTaskSubmitter implements TaskSubmitter {
       CallOptions callOptions);
 
   private static native byte[] nativeCreatePlacementGroup(
-      String name, List<Map<String, Double>> bundles, int strategy);
+      PlacementGroupCreationOptions creationOptions);
 
   private static native void nativeRemovePlacementGroup(byte[] placementGroupId);
 
   private static native boolean nativeWaitPlacementGroupReady(
-      byte[] placementGroupId, int timeoutMs);
+      byte[] placementGroupId, int timeoutSeconds);
 }

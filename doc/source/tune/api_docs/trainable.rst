@@ -255,6 +255,8 @@ Use ``validate_save_restore`` to catch ``save_checkpoint``/``load_checkpoint`` e
     validate_save_restore(MyTrainableClass)
     validate_save_restore(MyTrainableClass, use_object_store=True)
 
+
+
 Advanced: Reusing Actors
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -292,23 +294,26 @@ This requires you to implement ``Trainable.reset_config``, which provides a new 
 Advanced Resource Allocation
 ----------------------------
 
-Trainables can themselves be distributed. If your trainable function / class creates further Ray actors or tasks that also consume CPU / GPU resources, you will want to set ``extra_cpu`` or ``extra_gpu`` inside ``tune.run`` to reserve extra resource slots. For example, if a trainable class requires 1 GPU itself, but also launches 4 actors, each using another GPU, then you should set ``"gpu": 1, "extra_gpu": 4``.
+Trainables can themselves be distributed. If your trainable function / class creates further Ray actors or tasks that also consume CPU / GPU resources, you will want to add more bundles to the :class:`PlacementGroupFactory` to reserve extra resource slots. For example, if a trainable class requires 1 GPU itself, but also launches 4 actors, each using another GPU, then you should use this:
 
 .. code-block:: python
-   :emphasize-lines: 4-8
+   :emphasize-lines: 4-10
 
     tune.run(
         my_trainable,
         name="my_trainable",
-        resources_per_trial={
-            "cpu": 1,
-            "gpu": 1,
-            "extra_gpu": 4
-        }
+        resources_per_trial=tune.PlacementGroupFactory([
+            {"CPU": 1, "GPU": 1},
+            {"GPU": 1},
+            {"GPU": 1},
+            {"GPU": 1},
+            {"GPU": 1}
+        ])
     )
 
 The ``Trainable`` also provides the ``default_resource_requests`` interface to automatically declare the ``resources_per_trial`` based on the given configuration.
 
+It is also possible to specify memory (``"memory"``, in bytes) and custom resource requirements.
 
 
 .. _tune-function-docstring:
@@ -375,10 +380,13 @@ Ray also offers lightweight integrations to distribute your TensorFlow training 
 .. autofunction:: ray.tune.integration.tensorflow.DistributedTrainableCreator
    :noindex:
 
-tune.DurableTrainable
----------------------
 
-.. autoclass:: ray.tune.DurableTrainable
+.. _tune-with-parameters:
+
+tune.with_parameters
+--------------------
+
+.. autofunction:: ray.tune.with_parameters
 
 
 StatusReporter

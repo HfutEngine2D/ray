@@ -71,3 +71,28 @@ span.rst-current-version > span.fa.fa-book {
 dt:target, span.highlighted {
   background-color: #fbe54e;
 }
+
+/* allow scrollable images */
+.figure {
+    max-width: 100%;
+    overflow-x: auto;
+}
+img.horizontal-scroll {
+    max-width: none;
+}
+
+.clear-both {
+    clear: both;
+    min-height: 100px;
+    margin-top: 15px;
+}
+
+.buttons-float-left {
+    width: 150px;
+    float: left;
+}
+
+.buttons-float-right {
+    width: 150px;
+    float: right;
+}

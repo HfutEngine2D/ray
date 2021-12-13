@@ -1,5 +1,5 @@
 import numpy as np
-import tree
+import tree  # pip install dm_tree
 import random
 from typing import Union, Optional
 
@@ -11,8 +11,9 @@ from ray.rllib.utils.exploration.exploration import Exploration, TensorType
 from ray.rllib.utils.framework import try_import_tf, try_import_torch, \
     get_variable
 from ray.rllib.utils.from_config import from_config
+from ray.rllib.utils.numpy import convert_to_numpy
 from ray.rllib.utils.schedules import Schedule, PiecewiseSchedule
-from ray.rllib.utils.torch_ops import FLOAT_MIN
+from ray.rllib.utils.torch_utils import FLOAT_MIN
 
 tf1, tf, tfv = try_import_tf()
 torch, _ = try_import_torch()
@@ -65,15 +66,17 @@ class EpsilonGreedy(Exploration):
             dtype=np.int64)
 
         # Build the tf-info-op.
-        if self.framework in ["tf2", "tf", "tfe"]:
-            self._tf_info_op = self.get_info()
+        if self.framework == "tf":
+            self._tf_state_op = self.get_state()
 
     @override(Exploration)
-    def get_exploration_action(self,
-                               *,
-                               action_distribution: ActionDistribution,
-                               timestep: Union[int, TensorType],
-                               explore: bool = True):
+    def get_exploration_action(
+            self,
+            *,
+            action_distribution: ActionDistribution,
+            timestep: Union[int, TensorType],
+            explore: Optional[Union[bool, TensorType]] = True,
+    ):
 
         if self.framework in ["tf2", "tf", "tfe"]:
             return self._get_tf_exploration_action_op(action_distribution,
@@ -125,11 +128,13 @@ class EpsilonGreedy(Exploration):
             ),
             false_fn=lambda: exploit_action)
 
-        if self.framework in ["tf2", "tfe"]:
+        if self.framework in ["tf2", "tfe"
+                              ] and not self.policy_config["eager_tracing"]:
             self.last_timestep = timestep
             return action, tf.zeros_like(action, dtype=tf.float32)
         else:
-            assign_op = tf1.assign(self.last_timestep, timestep)
+            assign_op = tf1.assign(self.last_timestep,
+                                   tf.cast(timestep, tf.int64))
             with tf1.control_dependencies([assign_op]):
                 return action, tf.zeros_like(action, dtype=tf.float32)
 
@@ -193,8 +198,23 @@ class EpsilonGreedy(Exploration):
             return exploit_action, action_logp
 
     @override(Exploration)
-    def get_info(self, sess: Optional["tf.Session"] = None):
+    def get_state(self, sess: Optional["tf.Session"] = None):
         if sess:
-            return sess.run(self._tf_info_op)
+            return sess.run(self._tf_state_op)
         eps = self.epsilon_schedule(self.last_timestep)
-        return {"cur_epsilon": eps}
+        return {
+            "cur_epsilon": convert_to_numpy(eps)
+            if self.framework != "tf" else eps,
+            "last_timestep": convert_to_numpy(self.last_timestep)
+            if self.framework != "tf" else self.last_timestep,
+        }
+
+    @override(Exploration)
+    def set_state(self, state: dict,
+                  sess: Optional["tf.Session"] = None) -> None:
+        if self.framework == "tf":
+            self.last_timestep.load(state["last_timestep"], session=sess)
+        elif isinstance(self.last_timestep, int):
+            self.last_timestep = state["last_timestep"]
+        else:
+            self.last_timestep.assign(state["last_timestep"])

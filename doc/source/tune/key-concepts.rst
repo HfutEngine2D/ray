@@ -66,21 +66,22 @@ See the documentation: :ref:`trainable-docs` and :ref:`examples <tune-general-ex
 tune.run and Trials
 -------------------
 
-Use :ref:`tune.run <tune-run-ref>` to execute hyperparameter tuning. This function manages your experiment and provides many features such as :ref:`logging <tune-logging>`, :ref:`checkpointing <tune-checkpoint>`, and :ref:`early stopping <tune-stopping>`.
+Use :ref:`tune.run <tune-run-ref>` to execute hyperparameter tuning. This function manages your experiment and provides many features such as :ref:`logging <tune-logging>`, :ref:`checkpointing <tune-checkpoint-syncing>`, and :ref:`early stopping <tune-stopping>`.
 
 .. code-block:: python
 
-    # Pass in a Trainable class or function to tune.run.
-    tune.run(trainable)
+    # Pass in a Trainable class or function to tune.run, along with configs
+    tune.run(trainable, config={"a": 2, "b": 4})
 
-``tune.run`` will generate a couple hyperparameter configurations from its arguments, wrapping them into :ref:`Trial objects <trial-docstring>`.
+``tune.run`` will generate a couple of hyperparameter configurations from its arguments, wrapping them into :ref:`Trial objects <trial-docstring>`.
 
 Each trial has
-* a hyperparameter configuration (``trial.config``), id (``trial.trial_id``)
-* a resource specification (``resources_per_trial`` or ``trial.resources``)
-* And other configuration values.
 
-Each trial is also associated with one instance of a :ref:`Trainable <trainable-docs>`. You can access trial objects through the :ref:`Analysis object <tune-concepts-analysis>` provided after ``tune.run`` finishes.
+- a hyperparameter configuration (``trial.config``), id (``trial.trial_id``)
+- a resource specification (``resources_per_trial`` or ``trial.placement_group_factory``)
+- And other configuration values.
+
+Each trial is also associated with one instance of a :ref:`Trainable <trainable-docs>`. You can access trial objects through the :ref:`ExperimentAnalysis object <tune-concepts-analysis>` provided after ``tune.run`` finishes.
 
 ``tune.run`` will execute until all trials stop or error:
 
@@ -103,7 +104,7 @@ You can also easily run 10 trials. Tune automatically :ref:`determines how many 
 
 .. code-block:: python
 
-    tune.run(trainable, num_samples=10)
+    tune.run(trainable, config={"a": 2, "b": 4}, num_samples=10)
 
 Finally, you can randomly sample or grid search hyperparameters via Tune's :ref:`search space API <tune-default-search-space>`:
 
@@ -138,12 +139,14 @@ Here's an example covering all search space functions. Again,
     config = {
         "uniform": tune.uniform(-5, -1),  # Uniform float between -5 and -1
         "quniform": tune.quniform(3.2, 5.4, 0.2),  # Round to increments of 0.2
-        "loguniform": tune.loguniform(1e-4, 1e-2),  # Uniform float in log space
-        "qloguniform": tune.qloguniform(1e-4, 1e-1, 5e-4),  # Round to increments of 0.0005
+        "loguniform": tune.loguniform(1e-4, 1e-1),  # Uniform float in log space
+        "qloguniform": tune.qloguniform(1e-4, 1e-1, 5e-5),  # Round to increments of 0.00005
         "randn": tune.randn(10, 2),  # Normal distribution with mean 10 and sd 2
         "qrandn": tune.qrandn(10, 2, 0.2),  # Round to increments of 0.2
         "randint": tune.randint(-9, 15),  # Random integer between -9 and 15
         "qrandint": tune.qrandint(-21, 12, 3),  # Round to increments of 3 (includes 12)
+        "lograndint": tune.lograndint(1, 10),  # Random integer in log space
+        "qlograndint": tune.qlograndint(1, 10, 2),  # Round to increments of 2
         "choice": tune.choice(["a", "b", "c"]),  # Choose one of these options uniformly
         "func": tune.sample_from(lambda spec: spec.config.uniform * 0.01), # Depends on other value
         "grid": tune.grid_search([32, 64, 128])  # Search over all these values
@@ -156,41 +159,34 @@ To optimize the hyperparameters of your training process, you will want to use a
 
 .. code-block:: python
 
-    # Be sure to first run `pip install hyperopt`
+    # Be sure to first run `pip install bayesian-optimization`
 
-    import hyperopt as hp
-    from ray.tune.suggest.hyperopt import HyperOptSearch
+    from ray.tune.suggest import ConcurrencyLimiter
+    from ray.tune.suggest.bayesopt import BayesOptSearch
 
-    # Create a HyperOpt search space
+    # Define the search space
     config = {
         "a": tune.uniform(0, 1),
         "b": tune.uniform(0, 20)
-
-        # Note: Arbitrary HyperOpt search spaces should be supported!
-        # "foo": tune.randn(0, 1))
     }
 
-    # Specify the search space and maximize score
-    hyperopt = HyperOptSearch(metric="score", mode="max")
-
-    # Execute 20 trials using HyperOpt and stop after 20 iterations
+    # Execute 20 trials using BayesOpt and stop after 20 iterations
     tune.run(
         trainable,
         config=config,
-        search_alg=hyperopt,
+        metric="score",
+        mode="max",
+        # Limit to two concurrent trials (otherwise we end up with random search)
+        search_alg=ConcurrencyLimiter(
+            BayesOptSearch(random_search_steps=4),
+            max_concurrent=2),
         num_samples=20,
-        stop={"training_iteration": 20}
-    )
+        stop={"training_iteration": 20},
+        verbose=2)
 
-Tune has SearchAlgorithms that integrate with many popular **optimization** libraries, such as :ref:`Nevergrad <nevergrad>` and :ref:`Hyperopt <tune-hyperopt>`. Tune automatically converts the provided search space into the search
+
+Tune has SearchAlgorithms that integrate with many popular **optimization** libraries, such as :ref:`Nevergrad <nevergrad>` and :ref:`HyperOpt <tune-hyperopt>`. Tune automatically converts the provided search space into the search
 spaces the search algorithms/underlying library expect.
-
-.. note::
-    We are currently in the process of implementing automatic search space
-    conversions for all search algorithms. Currently this works for
-    AxSearch, BayesOpt, Hyperopt and Optuna. The other search algorithms
-    will follow shortly, but have to be instantiated with their respective
-    search spaces at the moment.
 
 See the documentation: :ref:`tune-search-alg`.
 
@@ -229,7 +225,7 @@ See the documentation: :ref:`schedulers-ref`.
 Analysis
 --------
 
-``tune.run`` returns an :ref:`Analysis <tune-analysis-docs>` object which has methods you can use for analyzing your training.
+``tune.run`` returns an :ref:`ExperimentAnalysis <tune-analysis-docs>` object which has methods you can use for analyzing your training.
 
 .. code-block:: python
 

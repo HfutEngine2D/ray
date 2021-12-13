@@ -15,7 +15,7 @@
 #include "ray/raylet/raylet.h"
 
 #include <boost/asio.hpp>
-#include <boost/bind.hpp>
+#include <boost/bind/bind.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <iostream>
 
@@ -54,50 +54,20 @@ namespace ray {
 
 namespace raylet {
 
-Raylet::Raylet(boost::asio::io_service &main_service, const std::string &socket_name,
+Raylet::Raylet(instrumented_io_context &main_service, const std::string &socket_name,
                const std::string &node_ip_address, const std::string &redis_address,
                int redis_port, const std::string &redis_password,
                const NodeManagerConfig &node_manager_config,
                const ObjectManagerConfig &object_manager_config,
                std::shared_ptr<gcs::GcsClient> gcs_client, int metrics_export_port)
     : main_service_(main_service),
-      self_node_id_(NodeID::FromRandom()),
+      self_node_id_(
+          !RayConfig::instance().OVERRIDE_NODE_ID_FOR_TESTING().empty()
+              ? NodeID::FromHex(RayConfig::instance().OVERRIDE_NODE_ID_FOR_TESTING())
+              : NodeID::FromRandom()),
       gcs_client_(gcs_client),
-      object_directory_(
-          RayConfig::instance().ownership_based_object_directory_enabled()
-              ? std::dynamic_pointer_cast<ObjectDirectoryInterface>(
-                    std::make_shared<OwnershipBasedObjectDirectory>(main_service,
-                                                                    gcs_client_))
-              : std::dynamic_pointer_cast<ObjectDirectoryInterface>(
-                    std::make_shared<ObjectDirectory>(main_service, gcs_client_))),
-      object_manager_(
-          main_service, self_node_id_, object_manager_config, object_directory_,
-          [this](const ObjectID &object_id, const std::string &object_url,
-                 const NodeID &node_id,
-                 std::function<void(const ray::Status &)> callback) {
-            node_manager_.GetLocalObjectManager().AsyncRestoreSpilledObject(
-                object_id, object_url, node_id, callback);
-          },
-          [this]() {
-            // This callback is called from the plasma store thread.
-            // NOTE: It means the local object manager should be thread-safe.
-            main_service_.post([this]() {
-              node_manager_.GetLocalObjectManager().SpillObjectUptoMaxThroughput();
-            });
-            return node_manager_.GetLocalObjectManager().IsSpillingInProgress();
-          },
-          [this]() {
-            // Post on the node manager's event loop since this
-            // callback is called from the plasma store thread.
-            // This will help keep node manager lock-less.
-            main_service_.post([this]() { node_manager_.TriggerGlobalGC(); });
-          }),
-      node_manager_(main_service, self_node_id_, node_manager_config, object_manager_,
-                    gcs_client_, object_directory_,
-                    [this](const ObjectID &object_id) {
-                      // It is used by local_object_store.
-                      return object_manager_.IsPlasmaObjectSpillable(object_id);
-                    }),
+      node_manager_(main_service, self_node_id_, node_manager_config,
+                    object_manager_config, gcs_client_),
       socket_name_(socket_name),
       acceptor_(main_service, ParseUrlEndpoint(socket_name)),
       socket_(main_service) {
@@ -106,7 +76,7 @@ Raylet::Raylet(boost::asio::io_service &main_service, const std::string &socket_
   self_node_info_.set_node_manager_address(node_ip_address);
   self_node_info_.set_raylet_socket_name(socket_name);
   self_node_info_.set_object_store_socket_name(object_manager_config.store_socket_name);
-  self_node_info_.set_object_manager_port(object_manager_.GetServerPort());
+  self_node_info_.set_object_manager_port(node_manager_.GetObjectManagerPort());
   self_node_info_.set_node_manager_port(node_manager_.GetServerPort());
   self_node_info_.set_node_manager_hostname(boost::asio::ip::host_name());
   self_node_info_.set_metrics_export_port(metrics_export_port);
@@ -122,8 +92,8 @@ void Raylet::Start() {
 }
 
 void Raylet::Stop() {
-  object_manager_.Stop();
-  RAY_CHECK_OK(gcs_client_->Nodes().UnregisterSelf());
+  RAY_CHECK_OK(gcs_client_->Nodes().DrainSelf());
+  node_manager_.Stop();
   acceptor_.close();
 }
 
@@ -175,7 +145,9 @@ void Raylet::HandleAccept(const boost::system::error_code &error) {
       node_manager_.ProcessClientMessage(client, message_type, message.data());
     };
     flatbuffers::FlatBufferBuilder fbb;
-    fbb.Finish(protocol::CreateDisconnectClient(fbb));
+    protocol::DisconnectClientBuilder builder(fbb);
+    builder.add_disconnect_type(static_cast<int>(rpc::WorkerExitType::SYSTEM_ERROR_EXIT));
+    fbb.Finish(builder.Finish());
     std::vector<uint8_t> message_data(fbb.GetBufferPointer(),
                                       fbb.GetBufferPointer() + fbb.GetSize());
     // Accept a new local client and dispatch it to the node manager.

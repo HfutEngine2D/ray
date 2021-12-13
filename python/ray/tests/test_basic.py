@@ -9,11 +9,8 @@ import numpy as np
 import pytest
 
 import ray.cluster_utils
-from ray.test_utils import (
-    client_test_enabled,
-    dicts_equal,
-    wait_for_pid_to_exit,
-)
+from ray._private.test_utils import (client_test_enabled, get_error_message,
+                                     SignalActor, run_string_as_driver)
 
 import ray
 
@@ -34,8 +31,29 @@ def test_ignore_http_proxy(shutdown_only):
     assert ray.get(f.remote()) == 1
 
 
+# https://github.com/ray-project/ray/issues/16025
+def test_release_resources_race(shutdown_only):
+    # This test fails with the flag set to false.
+    ray.init(
+        num_cpus=2,
+        object_store_memory=700e6,
+        _system_config={"inline_object_status_in_refs": True})
+    refs = []
+    for _ in range(10):
+        refs.append(ray.put(np.zeros(20 * 1024 * 1024, dtype=np.uint8)))
+
+    @ray.remote
+    def consume(refs):
+        # Should work without releasing resources!
+        ray.get(refs)
+        return os.getpid()
+
+    pids = set(ray.get([consume.remote(refs) for _ in range(1000)]))
+    # Should not have started multiple workers.
+    assert len(pids) <= 2, pids
+
+
 # https://github.com/ray-project/ray/issues/7263
-@pytest.mark.skipif(client_test_enabled(), reason="message size")
 def test_grpc_message_size(shutdown_only):
     ray.init(num_cpus=1)
 
@@ -84,6 +102,12 @@ def test_submit_api(shutdown_only):
     ready_ids, remaining_ids = ray.wait([infeasible_id], timeout=0.05)
     assert len(ready_ids) == 0
     assert len(remaining_ids) == 1
+
+    # Check mismatch with num_returns.
+    with pytest.raises(ValueError):
+        ray.get(f.options(num_returns=2).remote(3))
+    with pytest.raises(ValueError):
+        ray.get(f.options(num_returns=3).remote(2))
 
     @ray.remote
     class Actor:
@@ -170,124 +194,46 @@ def test_invalid_arguments(shutdown_only):
                 x = 1
 
 
-def test_many_fractional_resources(shutdown_only):
-    ray.init(num_cpus=2, num_gpus=2, resources={"Custom": 2})
+@pytest.mark.skipif(sys.platform == "win32", reason="Failing on Windows")
+def test_user_setup_function():
+    script = """
+import ray
+ray.init()
+@ray.remote
+def get_pkg_dir():
+    return ray._private.runtime_env.VAR
 
-    @ray.remote
-    def g():
-        return 1
-
-    @ray.remote
-    def f(block, accepted_resources):
-        true_resources = {
-            resource: value[0][1]
-            for resource, value in ray.get_resource_ids().items()
-        }
-        if block:
-            ray.get(g.remote())
-        return dicts_equal(true_resources, accepted_resources)
-
-    # Check that the resource are assigned correctly.
-    result_ids = []
-    for rand1, rand2, rand3 in np.random.uniform(size=(100, 3)):
-        resource_set = {"CPU": int(rand1 * 10000) / 10000}
-        result_ids.append(f._remote([False, resource_set], num_cpus=rand1))
-
-        resource_set = {"CPU": 1, "GPU": int(rand1 * 10000) / 10000}
-        result_ids.append(f._remote([False, resource_set], num_gpus=rand1))
-
-        resource_set = {"CPU": 1, "Custom": int(rand1 * 10000) / 10000}
-        result_ids.append(
-            f._remote([False, resource_set], resources={"Custom": rand1}))
-
-        resource_set = {
-            "CPU": int(rand1 * 10000) / 10000,
-            "GPU": int(rand2 * 10000) / 10000,
-            "Custom": int(rand3 * 10000) / 10000
-        }
-        result_ids.append(
-            f._remote(
-                [False, resource_set],
-                num_cpus=rand1,
-                num_gpus=rand2,
-                resources={"Custom": rand3}))
-        result_ids.append(
-            f._remote(
-                [True, resource_set],
-                num_cpus=rand1,
-                num_gpus=rand2,
-                resources={"Custom": rand3}))
-    assert all(ray.get(result_ids))
-
-    # Check that the available resources at the end are the same as the
-    # beginning.
-    stop_time = time.time() + 10
-    correct_available_resources = False
-    while time.time() < stop_time:
-        available_resources = ray.available_resources()
-        if ("CPU" in available_resources
-                and ray.available_resources()["CPU"] == 2.0
-                and "GPU" in available_resources
-                and ray.available_resources()["GPU"] == 2.0
-                and "Custom" in available_resources
-                and ray.available_resources()["Custom"] == 2.0):
-            correct_available_resources = True
-            break
-    if not correct_available_resources:
-        assert False, "Did not get correct available resources."
+print("remote", ray.get(get_pkg_dir.remote()))
+print("local", ray._private.runtime_env.VAR)
 
 
-def test_background_tasks_with_max_calls(shutdown_only):
-    ray.init(num_cpus=2)
+"""
 
-    @ray.remote
-    def g():
-        time.sleep(.1)
-        return 0
-
-    @ray.remote(max_calls=1, max_retries=0)
-    def f():
-        return [g.remote()]
-
-    nested = ray.get([f.remote() for _ in range(10)])
-
-    # Should still be able to retrieve these objects, since f's workers will
-    # wait for g to finish before exiting.
-    ray.get([x[0] for x in nested])
-
-    @ray.remote(max_calls=1, max_retries=0)
-    def f():
-        return os.getpid(), g.remote()
-
-    nested = ray.get([f.remote() for _ in range(10)])
-    while nested:
-        pid, g_id = nested.pop(0)
-        ray.get(g_id)
-        del g_id
-        wait_for_pid_to_exit(pid)
+    out = run_string_as_driver(
+        script,
+        {"RAY_USER_SETUP_FUNCTION": "ray._private.test_utils.set_setup_func"})
+    (remote_out, local_out) = out.strip().split("\n")[-2:]
+    assert remote_out == "remote hello world"
+    assert local_out == "local hello world"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Failing on Windows.")
-def test_fair_queueing(shutdown_only):
-    ray.init(num_cpus=1, _system_config={"fair_queueing_enabled": 1})
+# https://github.com/ray-project/ray/issues/17842
+@pytest.mark.skipif(sys.platform == "win32", reason="Failing on Windows")
+def test_disable_cuda_devices():
+    script = """
+import ray
+ray.init()
 
-    @ray.remote
-    def h():
-        return 0
+@ray.remote
+def check():
+    import os
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
-    @ray.remote
-    def g():
-        return ray.get(h.remote())
+print("remote", ray.get(check.remote()))
+"""
 
-    @ray.remote
-    def f():
-        return ray.get(g.remote())
-
-    # This will never finish without fair queueing of {f, g, h}:
-    # https://github.com/ray-project/ray/issues/3644
-    ready, _ = ray.wait(
-        [f.remote() for _ in range(1000)], timeout=60.0, num_returns=1000)
-    assert len(ready) == 1000, len(ready)
+    run_string_as_driver(script,
+                         {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
 
 
 def test_put_get(shutdown_only):
@@ -318,7 +264,6 @@ def test_put_get(shutdown_only):
         assert value_before == value_after
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Failing on Windows")
 def test_wait_timing(shutdown_only):
     ray.init(num_cpus=2)
 
@@ -358,40 +303,61 @@ def test_ray_options(shutdown_only):
 
     @ray.remote(
         num_cpus=2, num_gpus=3, memory=150 * 2**20, resources={"custom1": 1})
-    def foo():
-        import time
-        # Sleep for a heartbeat period to ensure resources changing reported.
-        time.sleep(0.1)
-        return ray.available_resources()
+    def foo(expected_resources):
+        # Possibly wait until the available resources have been updated
+        # (there might be a delay due to heartbeats)
+        retries = 10
+        keys = ["CPU", "GPU", "custom1"]
+        while retries >= 0:
+            resources = ray.available_resources()
+            do_return = True
+            for key in keys:
+                if resources[key] != expected_resources[key]:
+                    print(key, resources[key], expected_resources[key])
+                    do_return = False
+                    break
+            if do_return:
+                return resources["memory"]
+            time.sleep(0.1)
+            retries -= 1
+        raise RuntimeError("Number of retries exceeded")
 
-    without_options = ray.get(foo.remote())
-    with_options = ray.get(
+    expected_resources_without_options = {
+        "CPU": 8.0,
+        "GPU": 7.0,
+        "custom1": 1.0
+    }
+    memory_available_without_options = ray.get(
+        foo.remote(expected_resources_without_options))
+
+    expected_resources_with_options = {"CPU": 7.0, "GPU": 6.0, "custom1": 1.5}
+    memory_available_with_options = ray.get(
         foo.options(
             num_cpus=3,
             num_gpus=4,
             memory=50 * 2**20,
             resources={
                 "custom1": 0.5
-            }).remote())
+            }).remote(expected_resources_with_options))
 
-    to_check = ["CPU", "GPU", "memory", "custom1"]
-    for key in to_check:
-        assert without_options[key] != with_options[key], key
-    assert without_options != with_options
+    assert memory_available_without_options < memory_available_with_options
 
 
-@pytest.mark.skipif(client_test_enabled(), reason="message size")
+@pytest.mark.skipif(client_test_enabled(), reason="internal api")
 @pytest.mark.parametrize(
     "ray_start_cluster_head", [{
         "num_cpus": 0,
         "object_store_memory": 75 * 1024 * 1024,
+        "_system_config": {
+            "automatic_object_spilling_enabled": False
+        }
     }],
     indirect=True)
 def test_fetch_local(ray_start_cluster_head):
     cluster = ray_start_cluster_head
     cluster.add_node(num_cpus=2, object_store_memory=75 * 1024 * 1024)
 
-    signal_actor = ray.test_utils.SignalActor.remote()
+    signal_actor = SignalActor.remote()
 
     @ray.remote
     def put():
@@ -449,8 +415,6 @@ def test_nested_functions(ray_start_shared_local_modes):
     assert ray.get(factorial.remote(5)) == 120
 
 
-@pytest.mark.skipif(
-    client_test_enabled(), reason="mutual recursion is a known issue")
 def test_mutually_recursive_functions(ray_start_shared_local_modes):
     # Test remote functions that recursively call each other.
     @ray.remote
@@ -606,20 +570,20 @@ def test_keyword_args(ray_start_shared_local_modes):
         return
 
     # Make sure we get an exception if too many arguments are passed in.
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         f1.remote(3)
 
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         f1.remote(x=3)
 
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         f2.remote(0, w=0)
 
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         f2.remote(3, x=3)
 
     # Make sure we get an exception if too many arguments are passed in.
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError):
         f2.remote(1, 2, 3, 4)
 
     @ray.remote
@@ -691,6 +655,26 @@ def test_args_named_and_star(ray_start_shared_local_modes):
     ray.get(remote_test_function.remote(local_method, actor_method))
 
 
+def test_oversized_function(ray_start_shared_local_modes):
+    bar = np.zeros(100 * 1024 * 125)
+
+    @ray.remote
+    class Actor:
+        def foo(self):
+            return len(bar)
+
+    @ray.remote
+    def f():
+        return len(bar)
+
+    with pytest.raises(
+            ValueError, match="The remote function .*f is too large"):
+        f.remote()
+
+    with pytest.raises(ValueError, match="The actor Actor is too large"):
+        Actor.remote()
+
+
 def test_args_stars_after(ray_start_shared_local_modes):
     def star_args_after(a="hello", b="heo", *args, **kwargs):
         return a, b, args, kwargs
@@ -745,6 +729,76 @@ def test_nonascii_in_function_body(ray_start_shared_local_modes):
         return "φ"
 
     assert ray.get(return_a_greek_char.remote()) == "φ"
+
+
+def test_failed_task(ray_start_shared_local_modes, error_pubsub):
+    @ray.remote
+    def throw_exception_fct1():
+        raise Exception("Test function 1 intentionally failed.")
+
+    @ray.remote
+    def throw_exception_fct2():
+        raise Exception("Test function 2 intentionally failed.")
+
+    @ray.remote(num_returns=3)
+    def throw_exception_fct3(x):
+        raise Exception("Test function 3 intentionally failed.")
+
+    p = error_pubsub
+
+    throw_exception_fct1.remote()
+    throw_exception_fct1.remote()
+
+    if ray.worker.global_worker.mode != ray.worker.LOCAL_MODE:
+        msgs = get_error_message(p, 2, ray.ray_constants.TASK_PUSH_ERROR)
+        assert len(msgs) == 2
+        for msg in msgs:
+            assert "Test function 1 intentionally failed." in msg.error_message
+
+    x = throw_exception_fct2.remote()
+    try:
+        ray.get(x)
+    except Exception as e:
+        assert "Test function 2 intentionally failed." in str(e)
+    else:
+        # ray.get should throw an exception.
+        assert False
+
+    x, y, z = throw_exception_fct3.remote(1.0)
+    for ref in [x, y, z]:
+        try:
+            ray.get(ref)
+        except Exception as e:
+            assert "Test function 3 intentionally failed." in str(e)
+        else:
+            # ray.get should throw an exception.
+            assert False
+
+    class CustomException(ValueError):
+        def __init__(self, msg):
+            super().__init__(msg)
+            self.field = 1
+
+        def f(self):
+            return 2
+
+    @ray.remote
+    def f():
+        raise CustomException("This function failed.")
+
+    try:
+        ray.get(f.remote())
+    except Exception as e:
+        assert "This function failed." in str(e)
+        assert isinstance(e, ValueError)
+        assert isinstance(e, CustomException)
+        assert isinstance(e, ray.exceptions.RayTaskError)
+        assert "RayTaskError(CustomException)" in repr(e)
+        assert e.field == 1
+        assert e.f() == 2
+    else:
+        # ray.get should throw an exception.
+        assert False
 
 
 if __name__ == "__main__":

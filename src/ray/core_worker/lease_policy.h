@@ -22,6 +22,7 @@
 #include "src/ray/protobuf/common.pb.h"
 
 namespace ray {
+namespace core {
 
 struct LocalityData {
   uint64_t object_size;
@@ -45,8 +46,8 @@ class LeasePolicyInterface {
   virtual ~LeasePolicyInterface() {}
 };
 
-typedef std::function<absl::optional<rpc::Address>(const NodeID &node_id)>
-    NodeAddrFactory;
+using NodeAddrFactory =
+    std::function<absl::optional<rpc::Address>(const NodeID &node_id)>;
 
 /// Class used by the core worker to implement a locality-aware lease policy for
 /// picking a worker node for a lease request. This class is not thread-safe.
@@ -95,4 +96,5 @@ class LocalLeasePolicy : public LeasePolicyInterface {
   const rpc::Address local_node_rpc_address_;
 };
 
+}  // namespace core
 }  // namespace ray

@@ -8,11 +8,11 @@ import sys
 import weakref
 
 import numpy as np
+from numpy import log
 import pytest
 
 import ray
 import ray.cluster_utils
-import ray.test_utils
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +615,39 @@ def test_custom_serializer(ray_start_shared_local_modes):
     ray.util.register_serializer(
         A, serializer=custom_serializer, deserializer=custom_deserializer)
     ray.get(ray.put(A(1)))
+
+    ray.util.deregister_serializer(A)
+    with pytest.raises(Exception):
+        ray.get(ray.put(A(1)))
+
+    # deregister again takes no effects
+    ray.util.deregister_serializer(A)
+
+
+def test_numpy_ufunc(ray_start_shared_local_modes):
+    @ray.remote
+    def f():
+        # add reference to the numpy ufunc
+        log
+
+    ray.get(f.remote())
+
+
+class _SelfDereferenceObject:
+    """A object that dereferences itself during deserialization"""
+
+    def __init__(self, ref: ray.ObjectRef):
+        self.ref = ref
+
+    def __reduce__(self):
+        return ray.get, (self.ref, )
+
+
+def test_recursive_resolve(ray_start_shared_local_modes):
+    ref = ray.put(42)
+    for _ in range(10):
+        ref = ray.put(_SelfDereferenceObject(ref))
+    assert ray.get(ref) == 42
 
 
 if __name__ == "__main__":

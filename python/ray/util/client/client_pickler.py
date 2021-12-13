@@ -21,7 +21,6 @@ ClientPickler dumps things from the client into the appropriate stubs
 ServerUnpickler loads stubs from the server into their client counterparts.
 """
 
-import cloudpickle
 import io
 import sys
 
@@ -30,6 +29,7 @@ from typing import Any
 from typing import Dict
 from typing import Optional
 
+import ray.cloudpickle as cloudpickle
 from ray.util.client import RayAPIStub
 from ray.util.client.common import ClientObjectRef
 from ray.util.client.common import ClientActorHandle
@@ -38,9 +38,8 @@ from ray.util.client.common import ClientActorClass
 from ray.util.client.common import ClientRemoteFunc
 from ray.util.client.common import ClientRemoteMethod
 from ray.util.client.common import OptionWrapper
-from ray.util.client.common import SelfReferenceSentinel
+from ray.util.client.common import InProgressSentinel
 import ray.core.generated.ray_client_pb2 as ray_client_pb2
-from ray._private.client_mode_hook import disable_client_hook
 
 if sys.version_info < (3, 8):
     try:
@@ -50,12 +49,17 @@ if sys.version_info < (3, 8):
 else:
     import pickle  # noqa: F401
 
+
 # NOTE(barakmich): These PickleStubs are really close to
-# the data for an exectuion, with no arguments. Combine the two?
-PickleStub = NamedTuple("PickleStub",
-                        [("type", str), ("client_id", str), ("ref_id", bytes),
-                         ("name", Optional[str]),
-                         ("baseline_options", Optional[Dict])])
+# the data for an execution, with no arguments. Combine the two?
+class PickleStub(
+        NamedTuple("PickleStub", [("type", str), ("client_id", str),
+                                  ("ref_id", bytes), ("name", Optional[str]),
+                                  ("baseline_options", Optional[Dict])])):
+    def __reduce__(self):
+        # PySpark's namedtuple monkey patch breaks compatibility with
+        # cloudpickle. Thus we revert this patch here if it exists.
+        return object.__reduce__(self)
 
 
 class ClientPickler(cloudpickle.CloudPickler):
@@ -84,22 +88,18 @@ class ClientPickler(cloudpickle.CloudPickler):
             return PickleStub(
                 type="Actor",
                 client_id=self.client_id,
-                ref_id=obj._actor_id,
+                ref_id=obj._actor_id.id,
                 name=None,
                 baseline_options=None,
             )
         elif isinstance(obj, ClientRemoteFunc):
-            # TODO(barakmich): This is going to have trouble with mutually
-            # recursive functions that haven't, as yet, been executed. It's
-            # relatively doable (keep track of intermediate refs in progress
-            # with ensure_ref and return appropriately) But punting for now.
             if obj._ref is None:
                 obj._ensure_ref()
-            if type(obj._ref) == SelfReferenceSentinel:
+            if type(obj._ref) == InProgressSentinel:
                 return PickleStub(
                     type="RemoteFuncSelfReference",
                     client_id=self.client_id,
-                    ref_id=b"",
+                    ref_id=obj._client_side_ref.id,
                     name=None,
                     baseline_options=None,
                 )
@@ -111,14 +111,13 @@ class ClientPickler(cloudpickle.CloudPickler):
                 baseline_options=obj._options,
             )
         elif isinstance(obj, ClientActorClass):
-            # TODO(barakmich): Mutual recursion, as above.
             if obj._ref is None:
                 obj._ensure_ref()
-            if type(obj._ref) == SelfReferenceSentinel:
+            if type(obj._ref) == InProgressSentinel:
                 return PickleStub(
                     type="RemoteActorSelfReference",
                     client_id=self.client_id,
-                    ref_id=b"",
+                    ref_id=obj._client_side_ref.id,
                     name=None,
                     baseline_options=None,
                 )
@@ -133,8 +132,8 @@ class ClientPickler(cloudpickle.CloudPickler):
             return PickleStub(
                 type="RemoteMethod",
                 client_id=self.client_id,
-                ref_id=obj.actor_handle.actor_ref.id,
-                name=obj.method_name,
+                ref_id=obj._actor_handle.actor_ref.id,
+                name=obj._method_name,
                 baseline_options=None,
             )
         elif isinstance(obj, OptionWrapper):
@@ -147,19 +146,18 @@ class ServerUnpickler(pickle.Unpickler):
     def persistent_load(self, pid):
         assert isinstance(pid, PickleStub)
         if pid.type == "Object":
-            return ClientObjectRef(id=pid.ref_id)
+            return ClientObjectRef(pid.ref_id)
         elif pid.type == "Actor":
-            return ClientActorHandle(ClientActorRef(id=pid.ref_id))
+            return ClientActorHandle(ClientActorRef(pid.ref_id))
         else:
             raise NotImplementedError("Being passed back an unknown stub")
 
 
 def dumps_from_client(obj: Any, client_id: str, protocol=None) -> bytes:
-    with disable_client_hook():
-        with io.BytesIO() as file:
-            cp = ClientPickler(client_id, file, protocol=protocol)
-            cp.dump(obj)
-            return file.getvalue()
+    with io.BytesIO() as file:
+        cp = ClientPickler(client_id, file, protocol=protocol)
+        cp.dump(obj)
+        return file.getvalue()
 
 
 def loads_from_server(data: bytes,

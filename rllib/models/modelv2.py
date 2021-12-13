@@ -11,6 +11,7 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.policy.view_requirement import ViewRequirement
 from ray.rllib.utils import NullContextManager
 from ray.rllib.utils.annotations import DeveloperAPI, PublicAPI
+from ray.rllib.utils.deprecation import Deprecated
 from ray.rllib.utils.framework import try_import_tf, try_import_torch, \
     TensorType
 from ray.rllib.utils.spaces.repeated import Repeated
@@ -163,20 +164,16 @@ class ModelV2:
         """Override to return custom metrics from your model.
 
         The stats will be reported as part of the learner stats, i.e.,
-            info:
-                learner:
-                    model:
-                        key1: metric1
-                        key2: metric2
+        info.learner.[policy_id, e.g. "default_policy"].model.key1=metric1
 
         Returns:
-            Dict of string keys to scalar tensors.
+            Dict[str, TensorType]: The custom metrics for this model.
         """
         return {}
 
     def __call__(
             self,
-            input_dict: Dict[str, TensorType],
+            input_dict: Union[SampleBatch, ModelInputDict],
             state: List[Any] = None,
             seq_lens: TensorType = None) -> (TensorType, List[TensorType]):
         """Call the model with the given input tensors and state.
@@ -187,11 +184,11 @@ class ModelV2:
         Custom models should override forward() instead of __call__.
 
         Args:
-            input_dict (dict): dictionary of input tensors, including "obs",
-                "prev_action", "prev_reward", "is_training"
+            input_dict (Union[SampleBatch, ModelInputDict]): Dictionary of
+                input tensors.
             state (list): list of state tensors with sizes matching those
                 returned by get_initial_state + the batch dimension
-            seq_lens (Tensor): 1d tensor holding input sequence lengths
+            seq_lens (Tensor): 1D tensor holding input sequence lengths.
 
         Returns:
             (outputs, state): The model output tensor of size
@@ -200,38 +197,72 @@ class ModelV2:
                 [BATCH, state_size_i].
         """
 
-        restored = input_dict.copy()
-        restored["obs"] = restore_original_dimensions(
-            input_dict["obs"], self.obs_space, self.framework)
-        if len(input_dict["obs"].shape) > 2:
-            restored["obs_flat"] = flatten(input_dict["obs"], self.framework)
+        # Original observations will be stored in "obs".
+        # Flattened (preprocessed) obs will be stored in "obs_flat".
+
+        # SampleBatch case: Models can now be called directly with a
+        # SampleBatch (which also includes tracking-dict case (deprecated now),
+        # where tensors get automatically converted).
+        if isinstance(input_dict, SampleBatch):
+            restored = input_dict.copy(shallow=True)
         else:
+            restored = input_dict.copy()
+
+        # Backward compatibility.
+        if not state:
+            state = []
+            i = 0
+            while "state_in_{}".format(i) in input_dict:
+                state.append(input_dict["state_in_{}".format(i)])
+                i += 1
+        if seq_lens is None:
+            seq_lens = input_dict.get(SampleBatch.SEQ_LENS)
+
+        # No Preprocessor used: `config._disable_preprocessor_api`=True.
+        # TODO: This is unnecessary for when no preprocessor is used.
+        #  Obs are not flat then anymore. However, we'll keep this
+        #  here for backward-compatibility until Preprocessors have
+        #  been fully deprecated.
+        if self.model_config.get("_disable_preprocessor_api"):
             restored["obs_flat"] = input_dict["obs"]
+        # Input to this Model went through a Preprocessor.
+        # Generate extra keys: "obs_flat" (vs "obs", which will hold the
+        # original obs).
+        else:
+            restored["obs"] = restore_original_dimensions(
+                input_dict["obs"], self.obs_space, self.framework)
+            try:
+                if len(input_dict["obs"].shape) > 2:
+                    restored["obs_flat"] = flatten(input_dict["obs"],
+                                                   self.framework)
+                else:
+                    restored["obs_flat"] = input_dict["obs"]
+            except AttributeError:
+                restored["obs_flat"] = input_dict["obs"]
+
         with self.context():
             res = self.forward(restored, state or [], seq_lens)
+
+        if isinstance(input_dict, SampleBatch):
+            input_dict.accessed_keys = restored.accessed_keys - {"obs_flat"}
+            input_dict.deleted_keys = restored.deleted_keys
+            input_dict.added_keys = restored.added_keys - {"obs_flat"}
+
         if ((not isinstance(res, list) and not isinstance(res, tuple))
                 or len(res) != 2):
             raise ValueError(
                 "forward() must return a tuple of (output, state) tensors, "
                 "got {}".format(res))
-        outputs, state = res
+        outputs, state_out = res
 
-        try:
-            shape = outputs.shape
-        except AttributeError:
-            raise ValueError("Output is not a tensor: {}".format(outputs))
-        else:
-            if len(shape) != 2 or int(shape[1]) != self.num_outputs:
-                raise ValueError(
-                    "Expected output shape of [None, {}], got {}".format(
-                        self.num_outputs, shape))
-        if not isinstance(state, list):
-            raise ValueError("State output is not a list: {}".format(state))
+        if not isinstance(state_out, list):
+            raise ValueError(
+                "State output is not a list: {}".format(state_out))
 
         self._last_output = outputs
-        return outputs, state
+        return outputs, state_out if len(state_out) > 0 else (state or [])
 
-    @PublicAPI
+    @Deprecated(new="ModelV2.__call__()", error=False)
     def from_batch(self, train_batch: SampleBatch,
                    is_training: bool = True) -> (TensorType, List[TensorType]):
         """Convenience function that calls this model with a tensor batch.
@@ -247,7 +278,8 @@ class ModelV2:
         while "state_in_{}".format(i) in input_dict:
             states.append(input_dict["state_in_{}".format(i)])
             i += 1
-        ret = self.__call__(input_dict, states, input_dict.get("seq_lens"))
+        ret = self.__call__(input_dict, states,
+                            input_dict.get(SampleBatch.SEQ_LENS))
         return ret
 
     def import_from_h5(self, h5_file: str) -> None:
@@ -316,73 +348,6 @@ class ModelV2:
         """
         return self.time_major is True
 
-    # TODO: (sven) Experimental method.
-    def get_input_dict(self, sample_batch,
-                       index: Union[int, str] = "last") -> ModelInputDict:
-        """Creates single ts input-dict at given index from a SampleBatch.
-
-        Args:
-            sample_batch (SampleBatch): A single-trajectory SampleBatch object
-                to generate the compute_actions input dict from.
-            index (Union[int, str]): An integer index value indicating the
-                position in the trajectory for which to generate the
-                compute_actions input dict. Set to "last" to generate the dict
-                at the very end of the trajectory (e.g. for value estimation).
-                Note that "last" is different from -1, as "last" will use the
-                final NEXT_OBS as observation input.
-
-        Returns:
-            ModelInputDict: The (single-timestep) input dict for ModelV2 calls.
-        """
-        last_mappings = {
-            SampleBatch.OBS: SampleBatch.NEXT_OBS,
-            SampleBatch.PREV_ACTIONS: SampleBatch.ACTIONS,
-            SampleBatch.PREV_REWARDS: SampleBatch.REWARDS,
-        }
-
-        input_dict = {}
-        for view_col, view_req in self.view_requirements.items():
-            # Create batches of size 1 (single-agent input-dict).
-            data_col = view_req.data_col or view_col
-            if index == "last":
-                data_col = last_mappings.get(data_col, data_col)
-                # Range needed.
-                if view_req.shift_from is not None:
-                    data = sample_batch[view_col][-1]
-                    traj_len = len(sample_batch[data_col])
-                    missing_at_end = traj_len % view_req.batch_repeat_value
-                    obs_shift = -1 if data_col in [
-                        SampleBatch.OBS, SampleBatch.NEXT_OBS
-                    ] else 0
-                    from_ = view_req.shift_from + obs_shift
-                    to_ = view_req.shift_to + obs_shift + 1
-                    if to_ == 0:
-                        to_ = None
-                    input_dict[view_col] = np.array([
-                        np.concatenate([
-                            data, sample_batch[data_col][-missing_at_end:]
-                        ])[from_:to_]
-                    ])
-                # Single index.
-                else:
-                    data = sample_batch[data_col][-1]
-                    input_dict[view_col] = np.array([data])
-            else:
-                # Index range.
-                if isinstance(index, tuple):
-                    data = sample_batch[data_col][index[0]:index[1] + 1
-                                                  if index[1] != -1 else None]
-                    input_dict[view_col] = np.array([data])
-                # Single index.
-                else:
-                    input_dict[view_col] = sample_batch[data_col][
-                        index:index + 1 if index != -1 else None]
-
-        # Add valid `seq_lens`, just in case RNNs need it.
-        input_dict["seq_lens"] = np.array([1], dtype=np.int32)
-
-        return input_dict
-
 
 @DeveloperAPI
 def flatten(obs: TensorType, framework: str) -> TensorType:
@@ -418,15 +383,14 @@ def restore_original_dimensions(obs: TensorType,
         observation space.
     """
 
-    if hasattr(obs_space, "original_space"):
-        if tensorlib == "tf":
-            tensorlib = tf
-        elif tensorlib == "torch":
-            assert torch is not None
-            tensorlib = torch
-        return _unpack_obs(obs, obs_space.original_space, tensorlib=tensorlib)
-    else:
-        return obs
+    if tensorlib in ["tf", "tfe", "tf2"]:
+        assert tf is not None
+        tensorlib = tf
+    elif tensorlib == "torch":
+        assert torch is not None
+        tensorlib = torch
+    original_space = getattr(obs_space, "original_space", obs_space)
+    return _unpack_obs(obs, original_space, tensorlib=tensorlib)
 
 
 # Cache of preprocessors, for if the user is calling unpack obs often.
@@ -454,7 +418,12 @@ def _unpack_obs(obs: TensorType, space: gym.Space,
             # Make an attempt to cache the result, if enough space left.
             if len(_cache) < 999:
                 _cache[id(space)] = prep
-        if len(obs.shape) < 2 or obs.shape[-1] != prep.shape[0]:
+        # Already unpacked?
+        if (isinstance(space, gym.spaces.Tuple) and
+                isinstance(obs, (list, tuple))) or \
+                (isinstance(space, gym.spaces.Dict) and isinstance(obs, dict)):
+            return obs
+        elif len(obs.shape) < 2 or obs.shape[-1] != prep.shape[0]:
             raise ValueError(
                 "Expected flattened obs shape of [..., {}], got {}".format(
                     prep.shape[0], obs.shape))
@@ -490,7 +459,8 @@ def _unpack_obs(obs: TensorType, space: gym.Space,
                     tensorlib.reshape(obs_slice, batch_dims + list(p.shape)),
                     v,
                     tensorlib=tensorlib)
-        elif isinstance(space, Repeated):
+        # Repeated space.
+        else:
             assert isinstance(prep, RepeatedValuesPreprocessor), prep
             child_size = prep.child_preprocessor.size
             # The list lengths are stored in the first slot of the flat obs.
@@ -503,8 +473,6 @@ def _unpack_obs(obs: TensorType, space: gym.Space,
                 with_repeat_dim, space.child_space, tensorlib=tensorlib)
             return RepeatedValues(
                 u, lengths=lengths, max_len=prep._obs_space.max_len)
-        else:
-            assert False, space
         return u
     else:
         return obs

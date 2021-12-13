@@ -1,5 +1,16 @@
+.. include:: rllib/we_are_hiring.rst
+
 RLlib Table of Contents
 =======================
+
+RLlib Core Concepts
+-------------------
+
+*  `Policies <rllib/core-concepts.html#policies>`__
+
+*  `Sample Batches <rllib/core-concepts.html#sample-batches>`__
+
+*  `Training <rllib/core-concepts.html#training>`__
 
 Training APIs
 -------------
@@ -117,7 +128,7 @@ Algorithms
 
    -  |pytorch| |tensorflow| :ref:`Evolution Strategies <es>`
 
-*  Model-based / Meta-learning
+*  Model-based / Meta-learning / Offline
 
    -  |pytorch| :ref:`Single-Player AlphaZero (contrib/AlphaZero) <alphazero>`
 
@@ -126,6 +137,8 @@ Algorithms
    -  |pytorch| :ref:`Model-Based Meta-Policy-Optimization (MBMPO) <mbmpo>`
 
    -  |pytorch| :ref:`Dreamer (DREAMER) <dreamer>`
+
+   -  |pytorch| :ref:`Conservative Q-Learning (CQL) <cql>`
 
 *  Multi-agent
 
@@ -220,7 +233,14 @@ references in the cluster.
 TensorFlow 2.0
 ~~~~~~~~~~~~~~
 
-RLlib currently runs in ``tf.compat.v1`` mode. This means eager execution is disabled by default, and RLlib imports TF with ``import tensorflow.compat.v1 as tf; tf.disable_v2_behaviour()``. Eager execution can be enabled manually by calling ``tf.enable_eager_execution()`` or setting the ``"eager": True`` trainer config.
+RLlib supports both tf2.x as well as ``tf.compat.v1`` modes.
+Always use the ``ray.rllib.utils.framework.try_import_tf()`` utility function to import tensorflow.
+It returns three values:
+*  ``tf1``: The ``tf.compat.v1`` module or the installed tf1.x package (if the version is < 2.0).
+*  ``tf``: The installed tensorflow module as-is.
+*  ``tfv``: A convenience version int, whose values are either 1 or 2.
+
+`See here <https://github.com/ray-project/ray/blob/master/rllib/examples/eager_execution.py>`__ for a detailed example script.
 
 .. |tensorflow| image:: tensorflow.png
     :class: inline-figure

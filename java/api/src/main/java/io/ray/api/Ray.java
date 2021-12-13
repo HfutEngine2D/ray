@@ -1,14 +1,9 @@
 package io.ray.api;
 
-import io.ray.api.id.PlacementGroupId;
-import io.ray.api.id.UniqueId;
-import io.ray.api.placementgroup.PlacementGroup;
-import io.ray.api.placementgroup.PlacementStrategy;
 import io.ray.api.runtime.RayRuntime;
 import io.ray.api.runtime.RayRuntimeFactory;
 import io.ray.api.runtimecontext.RuntimeContext;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 
@@ -65,6 +60,21 @@ public final class Ray extends RayCall {
    */
   public static <T> ObjectRef<T> put(T obj) {
     return internal().put(obj);
+  }
+
+  /**
+   * Store an object in the object store and assign its ownership to owner. This function is
+   * experimental.
+   *
+   * @param obj The Java object to be stored.
+   * @param owner The actor that should own this object. This allows creating objects with lifetimes
+   *     decoupled from that of the creating process. Note that the owner actor must be passed a
+   *     reference to the object prior to the object creator exiting, otherwise the reference will
+   *     still be lost.
+   * @return A ObjectRef instance that represents the in-store object.
+   */
+  public static <T> ObjectRef<T> put(T obj, BaseActorHandle owner) {
+    return internal().put(obj, owner);
   }
 
   /**
@@ -141,31 +151,34 @@ public final class Ray extends RayCall {
   }
 
   /**
-   * Get a handle to a named actor of current job.
+   * Get a handle to a named actor in current namespace.
    *
-   * <p>Gets a handle to a named actor with the given name. The actor must have been created with
-   * name specified.
+   * <p>Gets a handle to a named actor with the given name of current namespace. The actor must have
+   * been created with name specified.
    *
    * @param name The name of the named actor.
-   * @return an ActorHandle to the actor if the actor of specified name exists or an
-   *     Optional.empty()
+   * @return an ActorHandle to the actor if the actor of specified name exists in current namespace
+   *     or an Optional.empty()
+   * @throws RayException An exception is raised if timed out.
    */
   public static <T extends BaseActorHandle> Optional<T> getActor(String name) {
-    return internal().getActor(name, false);
+    return internal().getActor(name, null);
   }
 
   /**
-   * Get a handle to a global named actor.
+   * Get a handle to a named actor in the given namespace.
    *
-   * <p>Gets a handle to a global named actor with the given name. The actor must have been created
-   * with global name specified.
+   * <p>Gets a handle to a named actor with the given name of the given namespace. The actor must
+   * have been created with name specified.
    *
-   * @param name The global name of the named actor.
-   * @return an ActorHandle to the actor if the actor of specified name exists or an
-   *     Optional.empty()
+   * @param name The name of the named actor.
+   * @param namespace The namespace of the actor.
+   * @return an ActorHandle to the actor if the actor of specified name exists in current namespace
+   *     or an Optional.empty()
+   * @throws RayException An exception is raised if timed out.
    */
-  public static <T extends BaseActorHandle> Optional<T> getGlobalActor(String name) {
-    return internal().getActor(name, true);
+  public static <T extends BaseActorHandle> Optional<T> getActor(String name, String namespace) {
+    return internal().getActor(name, namespace);
   }
 
   /**
@@ -223,55 +236,9 @@ public final class Ray extends RayCall {
     return runtime;
   }
 
-  /**
-   * Update the resource for the specified client. Set the resource for the specific node.
-   *
-   * @deprecated Consider using placement groups instead
-   *     (docs.ray.io/en/master/placement-group.html). You can also specify resources at Ray start
-   *     time with the 'resources' field in the cluster autoscaler.
-   */
-  @Deprecated
-  public static void setResource(UniqueId nodeId, String resourceName, double capacity) {
-    internal().setResource(resourceName, capacity, nodeId);
-  }
-
-  /**
-   * Set the resource for local node.
-   *
-   * @deprecated Consider using placement groups instead
-   *     (docs.ray.io/en/master/placement-group.html). You can also specify resources at Ray start
-   *     time with the 'resources' field in the cluster autoscaler.
-   */
-  @Deprecated
-  public static void setResource(String resourceName, double capacity) {
-    internal().setResource(resourceName, capacity, UniqueId.NIL);
-  }
-
   /** Get the runtime context. */
   public static RuntimeContext getRuntimeContext() {
     return internal().getRuntimeContext();
-  }
-
-  /**
-   * Create a placement group. A placement group is used to place actors according to a specific
-   * strategy and resource constraints. It will sends a request to GCS to preallocate the specified
-   * resources, which is asynchronous. If the specified resource cannot be allocated, it will wait
-   * for the resource to be updated and rescheduled. This function only works when gcs actor manager
-   * is turned on.
-   *
-   * @param name Name of the placement group.
-   * @param bundles Pre-allocated resource list.
-   * @param strategy Actor placement strategy.
-   * @return A handle to the created placement group.
-   */
-  public static PlacementGroup createPlacementGroup(
-      String name, List<Map<String, Double>> bundles, PlacementStrategy strategy) {
-    return internal().createPlacementGroup(name, bundles, strategy);
-  }
-
-  public static PlacementGroup createPlacementGroup(
-      List<Map<String, Double>> bundles, PlacementStrategy strategy) {
-    return internal().createPlacementGroup(bundles, strategy);
   }
 
   /**
@@ -284,33 +251,5 @@ public final class Ray extends RayCall {
    */
   public static void exitActor() {
     runtime.exitActor();
-  }
-
-  /**
-   * Get a placement group by placement group Id.
-   *
-   * @param id placement group id.
-   * @return The placement group.
-   */
-  public static PlacementGroup getPlacementGroup(PlacementGroupId id) {
-    return internal().getPlacementGroup(id);
-  }
-
-  /**
-   * Get all placement groups in this cluster.
-   *
-   * @return All placement groups.
-   */
-  public static List<PlacementGroup> getAllPlacementGroups() {
-    return internal().getAllPlacementGroups();
-  }
-
-  /**
-   * Remove a placement group by id. Throw RayException if remove failed.
-   *
-   * @param id Id of the placement group.
-   */
-  public static void removePlacementGroup(PlacementGroupId id) {
-    internal().removePlacementGroup(id);
   }
 }

@@ -1,10 +1,11 @@
 import os
 import pickle
-from collections.abc import Iterable
+from collections.abc import Sequence
 from multiprocessing import Process, Queue
 from numbers import Number
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
+import urllib
 
 from ray import logger
 from ray.tune import Trainable
@@ -23,15 +24,15 @@ except ImportError:
 
 WANDB_ENV_VAR = "WANDB_API_KEY"
 _WANDB_QUEUE_END = (None, )
-_VALID_TYPES = (Number, wandb.data_types.Video)
-_VALID_ITERABLE_TYPES = (wandb.data_types.Video)
+_VALID_TYPES = (Number, wandb.data_types.Video, wandb.data_types.Image)
+_VALID_ITERABLE_TYPES = (wandb.data_types.Video, wandb.data_types.Image)
 
 
 def _is_allowed_type(obj):
     """Return True if type is allowed for logging to wandb"""
     if isinstance(obj, np.ndarray) and obj.size == 1:
         return isinstance(obj.item(), Number)
-    if isinstance(obj, Iterable) and len(obj) > 0:
+    if isinstance(obj, Sequence) and len(obj) > 0:
         return isinstance(obj[0], _VALID_ITERABLE_TYPES)
     return isinstance(obj, _VALID_TYPES)
 
@@ -194,14 +195,20 @@ class _WandbLoggingProcess(Process):
         self.kwargs = kwargs
 
     def run(self):
+        os.environ["WANDB_START_METHOD"] = "fork"
         wandb.init(*self.args, **self.kwargs)
         while True:
             result = self.queue.get()
             if result == _WANDB_QUEUE_END:
                 break
             log, config_update = self._handle_result(result)
-            wandb.config.update(config_update, allow_val_change=True)
-            wandb.log(log)
+            try:
+                wandb.config.update(config_update, allow_val_change=True)
+                wandb.log(log)
+            except urllib.error.HTTPError as e:
+                # Ignore HTTPError. Missing a few data points is not a
+                # big issue, as long as things eventually recover.
+                logger.warn("Failed to log result to w&b: {}".format(str(e)))
         wandb.join()
 
     def _handle_result(self, result: Dict) -> Tuple[Dict, Dict]:
@@ -299,8 +306,7 @@ class WandbLoggerCallback(LoggerCallback):
                  **kwargs):
         self.project = project
         self.group = group
-        self.api_key_file = os.path.expanduser(
-            api_key_file) if api_key_file else None
+        self.api_key_path = api_key_file
         self.api_key = api_key
         self.excludes = excludes or []
         self.log_config = log_config
@@ -309,6 +315,9 @@ class WandbLoggerCallback(LoggerCallback):
         self._trial_processes: Dict["Trial", _WandbLoggingProcess] = {}
         self._trial_queues: Dict["Trial", Queue] = {}
 
+    def setup(self):
+        self.api_key_file = os.path.expanduser(self.api_key_path) if \
+            self.api_key_path else None
         _set_api_key(self.api_key_file, self.api_key)
 
     def log_trial_start(self, trial: "Trial"):
@@ -485,7 +494,7 @@ class WandbLogger(Logger):
 
         self._trial_experiment_logger = self._experiment_logger_cls(
             **wandb_config)
-
+        self._trial_experiment_logger.setup()
         self._trial_experiment_logger.log_trial_start(self.trial)
 
     def on_result(self, result: Dict):
@@ -557,6 +566,7 @@ class WandbTrainableMixin:
             config=_config)
         wandb_init_kwargs.update(wandb_config)
 
+        os.environ["WANDB_START_METHOD"] = "fork"
         self.wandb = self._wandb.init(**wandb_init_kwargs)
 
     def stop(self):

@@ -2,7 +2,7 @@ from collections import defaultdict
 import logging
 import pickle
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 from ray.tune import ExperimentAnalysis
 from ray.tune.result import DEFAULT_METRIC
@@ -203,7 +203,7 @@ class BayesOptSearch(Searcher):
             self.register_analysis(self._analysis)
 
     def set_search_properties(self, metric: Optional[str], mode: Optional[str],
-                              config: Dict) -> bool:
+                              config: Dict, **spec) -> bool:
         if self.optimizer:
             return False
         space = self.convert_search_space(config)
@@ -349,6 +349,13 @@ class BayesOptSearch(Searcher):
         if is_nan_or_inf(result[self.metric]):
             return
         self.optimizer.register(params, self._metric_op * result[self.metric])
+
+    def get_state(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        return state
+
+    def set_state(self, state: Dict[str, Any]):
+        self.__dict__.update(state)
 
     def save(self, checkpoint_path: str):
         """Storing current optimizer state."""

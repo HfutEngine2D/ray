@@ -10,12 +10,13 @@ from filelock import FileLock
 
 import ray
 from ray import tune
-from ray.tune.resources import Resources
-from ray.tune.utils.trainable import TrainableUtil
-from ray.tune.result import RESULT_DUPLICATE
-from ray.tune.logger import NoopLogger
-
 from ray.tune.function_runner import wrap_function
+from ray.tune.logger import NoopLogger
+from ray.tune.result import RESULT_DUPLICATE
+from ray.tune.trainable import DistributedTrainable
+from ray.tune.utils.placement_groups import PlacementGroupFactory
+from ray.tune.utils.trainable import TrainableUtil
+
 from horovod.ray import RayExecutor
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def distributed_checkpoint_dir(step: int, disable: bool = False):
         shutil.rmtree(path)
 
 
-class _HorovodTrainable(tune.Trainable):
+class _HorovodTrainable(DistributedTrainable):
     """Abstract Trainable class for Horovod."""
     # Callable function for training.
     _function = None
@@ -116,6 +117,8 @@ class _HorovodTrainable(tune.Trainable):
             num_hosts=self._num_hosts,
             num_slots=self._num_slots)
 
+        new_config = DistributedTrainable.build_config(self, config)
+
         # We can't put `self` in the lambda closure, so we
         # resolve the variable ahead of time.
         logdir_ = str(self.logdir)
@@ -124,7 +127,7 @@ class _HorovodTrainable(tune.Trainable):
         self.executor.start(
             executable_cls=trainable,
             executable_kwargs={
-                "config": config,
+                "config": new_config,
                 "logger_creator": lambda cfg: logger_creator(cfg, logdir_)
             })
 
@@ -247,15 +250,10 @@ def DistributedTrainableCreator(
 
         @classmethod
         def default_resource_request(cls, config: Dict):
-            extra_gpu = int(num_hosts * num_slots) * int(use_gpu)
-            extra_cpu = int(num_hosts * num_slots * num_cpus_per_slot)
-
-            return Resources(
-                cpu=0,
-                gpu=0,
-                extra_cpu=extra_cpu,
-                extra_gpu=extra_gpu,
-            )
+            return PlacementGroupFactory([{}] + [{
+                "CPU": cls._num_cpus_per_slot,
+                "GPU": int(use_gpu)
+            }] * (num_hosts * num_slots))
 
     return WrappedHorovodTrainable
 
@@ -278,3 +276,10 @@ def _train_simple(config: Dict):
                 with open(path, "wb") as f:
                     pickle.dump("hi", f)
         tune.report(test=1, rank=hvd.rank())
+
+
+def _train_validate_session(config: Dict):
+    current_session = tune.session.get_session()
+    assert current_session is not None
+    assert current_session.trial_id != "default"
+    assert current_session.trial_name != "default"

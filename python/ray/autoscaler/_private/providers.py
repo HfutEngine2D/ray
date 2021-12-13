@@ -1,3 +1,4 @@
+import copy
 import importlib
 import logging
 import json
@@ -11,6 +12,17 @@ logger = logging.getLogger(__name__)
 # For caching provider instantiations across API calls of one python session
 _provider_instances = {}
 
+# Minimal config for compatibility with legacy-style external configs.
+MINIMAL_EXTERNAL_CONFIG = {
+    "available_node_types": {
+        "ray.head.default": {},
+        "ray.worker.default": {},
+    },
+    "head_node_type": "ray.head.default",
+    "head_node": {},
+    "worker_nodes": {},
+}
+
 
 def _import_aws(provider_config):
     from ray.autoscaler._private.aws.node_provider import AWSNodeProvider
@@ -23,7 +35,7 @@ def _import_gcp(provider_config):
 
 
 def _import_azure(provider_config):
-    from ray.autoscaler._private.azure.node_provider import AzureNodeProvider
+    from ray.autoscaler._private._azure.node_provider import AzureNodeProvider
     return AzureNodeProvider
 
 
@@ -38,8 +50,20 @@ def _import_local(provider_config):
         return LocalNodeProvider
 
 
+def _import_readonly(provider_config):
+    from ray.autoscaler._private.readonly.node_provider import \
+        ReadOnlyNodeProvider
+    return ReadOnlyNodeProvider
+
+
+def _import_fake_multinode(provider_config):
+    from ray.autoscaler._private.fake_multi_node.node_provider import \
+        FakeMultiNodeProvider
+    return FakeMultiNodeProvider
+
+
 def _import_kubernetes(provider_config):
-    from ray.autoscaler._private.kubernetes.node_provider import \
+    from ray.autoscaler._private._kubernetes.node_provider import \
         KubernetesNodeProvider
     return KubernetesNodeProvider
 
@@ -48,6 +72,12 @@ def _import_staroid(provider_config):
     from ray.autoscaler._private.staroid.node_provider import \
         StaroidNodeProvider
     return StaroidNodeProvider
+
+
+def _import_aliyun(provider_config):
+    from ray.autoscaler._private.aliyun.node_provider import \
+        AliyunNodeProvider
+    return AliyunNodeProvider
 
 
 def _load_local_defaults_config():
@@ -81,6 +111,11 @@ def _load_staroid_defaults_config():
     return os.path.join(os.path.dirname(ray_staroid.__file__), "defaults.yaml")
 
 
+def _load_aliyun_defaults_config():
+    import ray.autoscaler.aliyun as ray_aliyun
+    return os.path.join(os.path.dirname(ray_aliyun.__file__), "defaults.yaml")
+
+
 def _import_external(provider_config):
     provider_cls = _load_class(path=provider_config["module"])
     return provider_cls
@@ -88,21 +123,27 @@ def _import_external(provider_config):
 
 _NODE_PROVIDERS = {
     "local": _import_local,
+    "fake_multinode": _import_fake_multinode,
+    "readonly": _import_readonly,
     "aws": _import_aws,
     "gcp": _import_gcp,
     "azure": _import_azure,
     "staroid": _import_staroid,
     "kubernetes": _import_kubernetes,
+    "aliyun": _import_aliyun,
     "external": _import_external  # Import an external module
 }
 
 _PROVIDER_PRETTY_NAMES = {
+    "readonly": "Readonly (Manual Cluster Setup)",
+    "fake_multinode": "Fake Multinode",
     "local": "Local",
     "aws": "AWS",
     "gcp": "GCP",
     "azure": "Azure",
     "staroid": "Staroid",
     "kubernetes": "Kubernetes",
+    "aliyun": "Aliyun",
     "external": "External"
 }
 
@@ -112,6 +153,7 @@ _DEFAULT_CONFIGS = {
     "gcp": _load_gcp_defaults_config,
     "azure": _load_azure_defaults_config,
     "staroid": _load_staroid_defaults_config,
+    "aliyun": _load_aliyun_defaults_config,
     "kubernetes": _load_kubernetes_defaults_config,
 }
 
@@ -192,7 +234,7 @@ def _get_default_config(provider_config):
     package outside the autoscaler.
     """
     if provider_config["type"] == "external":
-        return {}
+        return copy.deepcopy(MINIMAL_EXTERNAL_CONFIG)
     load_config = _DEFAULT_CONFIGS.get(provider_config["type"])
     if load_config is None:
         raise NotImplementedError("Unsupported node provider: {}".format(

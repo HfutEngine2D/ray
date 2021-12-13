@@ -1,6 +1,7 @@
+import inspect
 import logging
 import pickle
-from typing import Dict, Optional, Union, List, Sequence
+from typing import Dict, Optional, Type, Union, List, Sequence
 
 from ray.tune.result import DEFAULT_METRIC
 from ray.tune.sample import Categorical, Domain, Float, Integer, LogUniform, \
@@ -108,7 +109,8 @@ class NevergradSearch(Searcher):
     """
 
     def __init__(self,
-                 optimizer: Union[None, Optimizer, ConfiguredOptimizer] = None,
+                 optimizer: Union[None, Optimizer, Type[Optimizer],
+                                  ConfiguredOptimizer] = None,
                  space: Optional[Union[Dict, Parameter]] = None,
                  metric: Optional[str] = None,
                  mode: Optional[str] = None,
@@ -154,7 +156,9 @@ class NevergradSearch(Searcher):
                     "parameter.")
             self._parameters = space
             self._nevergrad_opt = optimizer
-        elif isinstance(optimizer, ConfiguredOptimizer):
+        elif (inspect.isclass(optimizer)
+              and issubclass(optimizer, Optimizer)) or isinstance(
+                  optimizer, ConfiguredOptimizer):
             self._opt_factory = optimizer
             self._parameters = None
             self._space = space
@@ -210,7 +214,7 @@ class NevergradSearch(Searcher):
                 self._nevergrad_opt.suggest(self._points_to_evaluate[i])
 
     def set_search_properties(self, metric: Optional[str], mode: Optional[str],
-                              config: Dict) -> bool:
+                              config: Dict, **spec) -> bool:
         if self._nevergrad_opt or self._space:
             return False
         space = self.convert_search_space(config)
@@ -274,15 +278,18 @@ class NevergradSearch(Searcher):
                                  self._metric_op * result[self._metric])
 
     def save(self, checkpoint_path: str):
-        trials_object = (self._nevergrad_opt, self._parameters)
+        save_object = self.__dict__
         with open(checkpoint_path, "wb") as outputFile:
-            pickle.dump(trials_object, outputFile)
+            pickle.dump(save_object, outputFile)
 
     def restore(self, checkpoint_path: str):
         with open(checkpoint_path, "rb") as inputFile:
-            trials_object = pickle.load(inputFile)
-        self._nevergrad_opt = trials_object[0]
-        self._parameters = trials_object[1]
+            save_object = pickle.load(inputFile)
+        if not isinstance(save_object, dict):
+            # backwards compatibility
+            # Deprecate: 1.8
+            self._nevergrad_opt, self._parameters = save_object
+        self.__dict__.update(save_object)
 
     @staticmethod
     def convert_search_space(spec: Dict) -> Parameter:
@@ -316,11 +323,12 @@ class NevergradSearch(Searcher):
                 if isinstance(sampler, LogUniform):
                     return ng.p.Log(
                         lower=domain.lower,
-                        upper=domain.upper,
+                        upper=domain.upper - 1,  # Upper bound exclusive
                         exponent=sampler.base).set_integer_casting()
                 return ng.p.Scalar(
                     lower=domain.lower,
-                    upper=domain.upper).set_integer_casting()
+                    upper=domain.upper - 1,  # Upper bound exclusive
+                ).set_integer_casting()
 
             elif isinstance(domain, Categorical):
                 return ng.p.Choice(choices=domain.categories)

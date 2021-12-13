@@ -6,9 +6,13 @@ import io.ray.api.Ray;
 import io.ray.runtime.AbstractRayRuntime;
 import io.ray.runtime.RayRuntimeInternal;
 import io.ray.runtime.RayRuntimeProxy;
+import io.ray.runtime.config.RayConfig;
 import io.ray.runtime.config.RunMode;
 import io.ray.runtime.task.ArgumentsBuilder;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.function.Supplier;
 import org.testng.Assert;
 
@@ -42,20 +46,19 @@ public class TestUtils {
    * @return True if the condition is met within the timeout, false otherwise.
    */
   public static boolean waitForCondition(Supplier<Boolean> condition, int timeoutMs) {
-    int waitTime = 0;
+    long endTime = System.currentTimeMillis() + timeoutMs;
     while (true) {
       if (condition.get()) {
         return true;
       }
 
+      if (System.currentTimeMillis() >= endTime) {
+        break;
+      }
       try {
         java.util.concurrent.TimeUnit.MILLISECONDS.sleep(WAIT_INTERVAL_MS);
       } catch (InterruptedException e) {
         throw new RuntimeException(e);
-      }
-      waitTime += WAIT_INTERVAL_MS;
-      if (waitTime > timeoutMs) {
-        break;
       }
     }
     return false;
@@ -98,5 +101,24 @@ public class TestUtils {
 
   public static int getNumWorkersPerProcess() {
     return Ray.task(TestUtils::getNumWorkersPerProcessRemoteFunction).remote().get();
+  }
+
+  public static ProcessBuilder buildDriver(Class<?> mainClass, String[] args) {
+    RayConfig rayConfig = TestUtils.getRuntime().getRayConfig();
+
+    List<String> fullArgs = new ArrayList<>();
+    fullArgs.add("java");
+    fullArgs.add("-cp");
+    fullArgs.add(System.getProperty("java.class.path"));
+    fullArgs.add("-Dray.address=" + rayConfig.getRedisAddress());
+    fullArgs.add("-Dray.object-store.socket-name=" + rayConfig.objectStoreSocketName);
+    fullArgs.add("-Dray.raylet.socket-name=" + rayConfig.rayletSocketName);
+    fullArgs.add("-Dray.raylet.node-manager-port=" + rayConfig.getNodeManagerPort());
+    fullArgs.add(mainClass.getName());
+    if (args != null) {
+      fullArgs.addAll(Arrays.asList(args));
+    }
+
+    return new ProcessBuilder(fullArgs);
   }
 }

@@ -3,14 +3,14 @@ import logging
 
 import ray
 import os
-from ray import tune
-from ray.tune.result import RESULT_DUPLICATE
 from ray.tune.function_runner import wrap_function
 from ray.tune.resources import Resources
-from ray.util.sgd.utils import find_free_port
-from ray.util.placement_group import remove_placement_group
+from ray.tune.result import RESULT_DUPLICATE
+from ray.tune.trainable import DistributedTrainable
+from ray.tune.utils import detect_checkpoint_function, find_free_port
+from ray.tune.utils.placement_groups import PlacementGroupFactory
 from ray.tune.utils.trainable import PlacementGroupUtil, TrainableUtil
-from ray.tune.utils.util import detect_checkpoint_function
+from ray.util.placement_group import remove_placement_group
 from typing import Callable, Dict, Type, Optional
 
 logger = logging.getLogger(__name__)
@@ -36,12 +36,12 @@ def setup_process_group(worker_addresses, index):
 
 
 def setup_address():
-    ip = ray.services.get_node_ip_address()
+    ip = ray.util.get_node_ip_address()
     port = find_free_port()
     return f"{ip}:{port}"
 
 
-class _TensorFlowTrainable(tune.Trainable):
+class _TensorFlowTrainable(DistributedTrainable):
     """Base class for distributed training on Tune."""
     _function = None
     _num_workers = None
@@ -71,8 +71,9 @@ class _TensorFlowTrainable(tune.Trainable):
                 self._num_workers_per_host, self._timeout_s)
         remote_trainable = \
             remote_trainable.options(**remote_option)
+        new_config = DistributedTrainable.build_config(self, config)
         self.workers = [
-            remote_trainable.remote(config=config, )
+            remote_trainable.remote(config=new_config, )
             for _ in range(num_workers)
         ]
 
@@ -182,11 +183,10 @@ def DistributedTrainableCreator(
 
         @classmethod
         def default_resource_request(cls, config: Dict) -> Resources:
-            return Resources(
-                cpu=0,
-                gpu=0,
-                extra_cpu=num_workers * num_cpus_per_worker,
-                extra_gpu=num_workers * num_gpus_per_worker)
+            return PlacementGroupFactory([{}] + [{
+                "CPU": cls._num_cpus_per_worker,
+                "GPU": cls._num_gpus_per_worker
+            }] * num_workers)
 
     return WrappedDistributedTensorFlowTrainable
 

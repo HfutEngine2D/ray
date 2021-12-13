@@ -2,6 +2,9 @@ package io.ray.docdemo;
 
 import io.ray.api.ActorHandle;
 import io.ray.api.Ray;
+import io.ray.api.function.RayFunc1;
+import io.ray.api.function.RayFunc2;
+import io.ray.api.function.RayFunc3;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.testng.Assert;
@@ -30,6 +33,18 @@ public class UsingActorsDemo {
 
     public void reset(int newValue) {
       this.value = newValue;
+    }
+  }
+
+  public static class CounterOverloaded extends Counter {
+    public int increment(int diff) {
+      super.value += diff;
+      return super.value;
+    }
+
+    public int increment(int diff1, int diff2) {
+      super.value += diff1 + diff2;
+      return super.value;
     }
   }
 
@@ -72,6 +87,19 @@ public class UsingActorsDemo {
     }
 
     {
+      ActorHandle<CounterOverloaded> a = Ray.actor(CounterOverloaded::new).remote();
+      // Call an overloaded actor method by super class method reference.
+      Assert.assertEquals((int) a.task(Counter::increment).remote().get(), 1);
+      // Call an overloaded actor method, cast method reference first.
+      a.task((RayFunc1<CounterOverloaded, Integer>) CounterOverloaded::increment).remote();
+      a.task((RayFunc2<CounterOverloaded, Integer, Integer>) CounterOverloaded::increment, 10)
+          .remote();
+      RayFunc3<CounterOverloaded, Integer, Integer, Integer> f = CounterOverloaded::increment;
+      a.task(f, 10, 10).remote();
+      Assert.assertEquals((int) a.task(Counter::increment).remote().get(), 33);
+    }
+
+    {
       Ray.actor(GpuActor::new).setResource("CPU", 2.0).setResource("GPU", 0.5).remote();
     }
 
@@ -91,16 +119,6 @@ public class UsingActorsDemo {
     {
       ActorHandle<Counter> actorHandle = Ray.actor(Counter::new).remote();
       actorHandle.kill();
-    }
-
-    {
-      // Create an actor with a globally unique name
-      ActorHandle<Counter> counter = Ray.actor(Counter::new).setGlobalName("some_name").remote();
-    }
-    {
-      // Retrieve the actor later somewhere
-      Optional<ActorHandle<Counter>> counter = Ray.getGlobalActor("some_name");
-      Assert.assertTrue(counter.isPresent());
     }
 
     {

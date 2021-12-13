@@ -2,9 +2,10 @@ import os
 from typing import Dict, Callable, Optional
 import logging
 
+import ray
 from ray.tune.trainable import Trainable
 from ray.tune.logger import Logger, LoggerCallback
-from ray.tune.result import TRAINING_ITERATION
+from ray.tune.result import TRAINING_ITERATION, TIMESTEPS_TOTAL
 from ray.tune.trial import Trial
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ class MLflowLoggerCallback(LoggerCallback):
             If the experiment with the name already exists with MlFlow,
             it will be reused. If not, a new experiment will be created with
             that name.
+        tags (Dict):  An optional dictionary of string keys and values to set
+            as tags on the run
         save_artifact (bool): If set to True, automatically save the entire
             contents of the Tune local_dir as an artifact to the
             corresponding run in MlFlow.
@@ -50,6 +53,10 @@ class MLflowLoggerCallback(LoggerCallback):
     .. code-block:: python
 
         from ray.tune.integration.mlflow import MLflowLoggerCallback
+
+        tags = { "user_name" : "John",
+                 "git_commit_hash" : "abc123"}
+
         tune.run(
             train_fn,
             config={
@@ -59,40 +66,61 @@ class MLflowLoggerCallback(LoggerCallback):
             },
             callbacks=[MLflowLoggerCallback(
                 experiment_name="experiment1",
+                tags=tags,
                 save_artifact=True)])
 
     """
 
-    def __init__(self,
-                 tracking_uri: Optional[str] = None,
-                 registry_uri: Optional[str] = None,
-                 experiment_name: Optional[str] = None,
-                 save_artifact: bool = False):
+    def __init__(
+            self,
+            tracking_uri: Optional[str] = None,
+            registry_uri: Optional[str] = None,
+            experiment_name: Optional[str] = None,
+            tags: Optional[Dict] = None,
+            save_artifact: bool = False,
+    ):
 
+        self.tracking_uri = tracking_uri
+        self.registry_uri = registry_uri
+        self.experiment_name = experiment_name
+        self.tags = tags
+        self.save_artifact = save_artifact
+
+        if ray.util.client.ray.is_connected():
+            logger.warning("When using MLflowLoggerCallback with Ray Client, "
+                           "it is recommended to use a remote tracking "
+                           "server. If you are using a MLflow tracking server "
+                           "backed by the local filesystem, then it must be "
+                           "setup on the server side and not on the client "
+                           "side.")
+
+    def setup(self):
         mlflow = _import_mlflow()
         if mlflow is None:
             raise RuntimeError("MLflow has not been installed. Please `pip "
                                "install mlflow` to use the MLflowLogger.")
 
         from mlflow.tracking import MlflowClient
-        self.client = MlflowClient(
-            tracking_uri=tracking_uri, registry_uri=registry_uri)
 
-        if experiment_name is None:
+        self.client = MlflowClient(
+            tracking_uri=self.tracking_uri, registry_uri=self.registry_uri)
+
+        if self.experiment_name is None:
             # If no name is passed in, then check env vars.
             # First check if experiment_name env var is set.
-            experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME")
+            self.experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME")
 
-        if experiment_name is not None:
+        if self.experiment_name is not None:
             # First check if experiment with name exists.
-            experiment = self.client.get_experiment_by_name(experiment_name)
+            experiment = self.client.get_experiment_by_name(
+                self.experiment_name)
             if experiment is not None:
                 # If it already exists then get the id.
                 experiment_id = experiment.experiment_id
             else:
                 # If it does not exist, create the experiment.
                 experiment_id = self.client.create_experiment(
-                    name=experiment_name)
+                    name=self.experiment_name)
         else:
             # No experiment_name is passed in and name env var is not set.
             # Now check the experiment id env var.
@@ -107,18 +135,26 @@ class MLflowLoggerCallback(LoggerCallback):
                                  "set one of these to use the "
                                  "MLflowLoggerCallback.")
 
+        if self.tags is None:
+            # Create empty dictionary for tags if not given explicitly
+            self.tags = {}
+
         # At this point, experiment_id should be set.
         self.experiment_id = experiment_id
-        self.save_artifact = save_artifact
+        self.save_artifact = self.save_artifact
 
         self._trial_runs = {}
 
     def log_trial_start(self, trial: "Trial"):
         # Create run if not already exists.
         if trial not in self._trial_runs:
+
+            # Set trial name in tags
+            tags = self.tags.copy()
+            tags["trial_name"] = str(trial)
+
             run = self.client.create_run(
-                experiment_id=self.experiment_id,
-                tags={"trial_name": str(trial)})
+                experiment_id=self.experiment_id, tags=tags)
             self._trial_runs[trial] = run.info.run_id
 
         run_id = self._trial_runs[trial]
@@ -130,6 +166,7 @@ class MLflowLoggerCallback(LoggerCallback):
             self.client.log_param(run_id=run_id, key=key, value=value)
 
     def log_trial_result(self, iteration: int, trial: "Trial", result: Dict):
+        step = result.get(TIMESTEPS_TOTAL) or result[TRAINING_ITERATION]
         run_id = self._trial_runs[trial]
         for key, value in result.items():
             try:
@@ -140,7 +177,7 @@ class MLflowLoggerCallback(LoggerCallback):
                                  key, value))
                 continue
             self.client.log_metric(
-                run_id=run_id, key=key, value=value, step=iteration)
+                run_id=run_id, key=key, value=value, step=step)
 
     def log_trial_end(self, trial: "Trial", failed: bool = False):
         run_id = self._trial_runs[trial]
@@ -182,6 +219,8 @@ class MLflowLogger(Logger):
 
         self._trial_experiment_logger = self._experiment_logger_cls(
             tracking_uri, registry_uri, experiment_name)
+
+        self._trial_experiment_logger.setup()
 
         self._trial_experiment_logger.log_trial_start(self.trial)
 
@@ -274,8 +313,8 @@ def mlflow_mixin(func: Callable):
         @mlflow_mixin
         def train_fn(config):
             for i in range(10):
-                loss = self.config["a"] + self.config["b"]
-                mlflow.log_metric(key="loss", value=loss})
+                loss = config["a"] + config["b"]
+                mlflow.log_metric(key="loss", value=loss)
             tune.report(loss=loss, done=True)
 
         tune.run(
@@ -294,6 +333,13 @@ def mlflow_mixin(func: Callable):
     if _import_mlflow() is None:
         raise RuntimeError("MLflow has not been installed. Please `pip "
                            "install mlflow` to use the mlflow_mixin.")
+    if ray.util.client.ray.is_connected():
+        logger.warning("When using mlflow_mixin with Ray Client, "
+                       "it is recommended to use a remote tracking "
+                       "server. If you are using a MLflow tracking server "
+                       "backed by the local filesystem, then it must be "
+                       "setup on the server side and not on the client "
+                       "side.")
     if hasattr(func, "__mixins__"):
         func.__mixins__ = func.__mixins__ + (MLflowTrainableMixin, )
     else:
@@ -304,6 +350,10 @@ def mlflow_mixin(func: Callable):
 class MLflowTrainableMixin:
     def __init__(self, config: Dict, *args, **kwargs):
         self._mlflow = _import_mlflow()
+
+        if self._mlflow is None:
+            raise RuntimeError("MLflow has not been installed. Please `pip "
+                               "install mlflow` to use the mlflow_mixin.")
 
         if not isinstance(self, Trainable):
             raise ValueError(

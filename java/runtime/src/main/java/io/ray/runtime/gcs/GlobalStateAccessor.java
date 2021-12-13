@@ -53,6 +53,15 @@ public class GlobalStateAccessor {
     }
   }
 
+  /** Returns next job id. */
+  public byte[] getNextJobID() {
+    // Get next job id from GCS.
+    synchronized (GlobalStateAccessor.class) {
+      validateGlobalStateAccessorPointer();
+      return this.nativeGetNextJobID(globalStateAccessorNativePointer);
+    }
+  }
+
   /** Returns A list of node info with GcsNodeInfo protobuf schema. */
   public List<byte[]> getAllNodeInfo() {
     // Fetch a node list with protobuf bytes format from GCS.
@@ -83,6 +92,13 @@ public class GlobalStateAccessor {
     }
   }
 
+  public byte[] getPlacementGroupInfo(String name, String namespace) {
+    synchronized (GlobalStateAccessor.class) {
+      validateGlobalStateAccessorPointer();
+      return nativeGetPlacementGroupInfoByName(globalStateAccessorNativePointer, name, namespace);
+    }
+  }
+
   public List<byte[]> getAllPlacementGroupInfo() {
     synchronized (GlobalStateAccessor.class) {
       validateGlobalStateAccessorPointer();
@@ -90,10 +106,10 @@ public class GlobalStateAccessor {
     }
   }
 
-  public byte[] getInternalConfig() {
+  public byte[] getInternalKV(String k) {
     synchronized (GlobalStateAccessor.class) {
       validateGlobalStateAccessorPointer();
-      return nativeGetInternalConfig(globalStateAccessorNativePointer);
+      return this.nativeGetInternalKV(globalStateAccessorNativePointer, k);
     }
   }
 
@@ -115,6 +131,15 @@ public class GlobalStateAccessor {
     }
   }
 
+  /** Get the node to connect for a Ray driver. */
+  public byte[] getNodeToConnectForDriver(String nodeIpAddress) {
+    // Fetch a node with protobuf bytes format from GCS.
+    synchronized (GlobalStateAccessor.class) {
+      validateGlobalStateAccessorPointer();
+      return this.nativeGetNodeToConnectForDriver(globalStateAccessorNativePointer, nodeIpAddress);
+    }
+  }
+
   private void destroyGlobalStateAccessor() {
     synchronized (GlobalStateAccessor.class) {
       if (0 == globalStateAccessorNativePointer) {
@@ -133,11 +158,11 @@ public class GlobalStateAccessor {
 
   private native List<byte[]> nativeGetAllJobInfo(long nativePtr);
 
+  private native byte[] nativeGetNextJobID(long nativePtr);
+
   private native List<byte[]> nativeGetAllNodeInfo(long nativePtr);
 
   private native byte[] nativeGetNodeResourceInfo(long nativePtr, byte[] nodeId);
-
-  private native byte[] nativeGetInternalConfig(long nativePtr);
 
   private native List<byte[]> nativeGetAllActorInfo(long nativePtr);
 
@@ -145,5 +170,12 @@ public class GlobalStateAccessor {
 
   private native byte[] nativeGetPlacementGroupInfo(long nativePtr, byte[] placementGroupId);
 
+  private native byte[] nativeGetPlacementGroupInfoByName(
+      long nativePtr, String name, String namespace);
+
   private native List<byte[]> nativeGetAllPlacementGroupInfo(long nativePtr);
+
+  private native byte[] nativeGetInternalKV(long nativePtr, String k);
+
+  private native byte[] nativeGetNodeToConnectForDriver(long nativePtr, String nodeIpAddress);
 }

@@ -10,25 +10,21 @@ import io.ray.api.placementgroup.PlacementGroup;
 import io.ray.api.runtimecontext.NodeInfo;
 import io.ray.runtime.generated.Gcs;
 import io.ray.runtime.generated.Gcs.GcsNodeInfo;
-import io.ray.runtime.generated.Gcs.TablePrefix;
 import io.ray.runtime.placementgroup.PlacementGroupUtils;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.lang3.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** An implementation of GcsClient. */
 public class GcsClient {
   private static Logger LOGGER = LoggerFactory.getLogger(GcsClient.class);
-  private RedisClient primary;
 
   private GlobalStateAccessor globalStateAccessor;
 
   public GcsClient(String redisAddress, String redisPassword) {
-    primary = new RedisClient(redisAddress, redisPassword);
     globalStateAccessor = GlobalStateAccessor.getInstance(redisAddress, redisPassword);
   }
 
@@ -44,6 +40,18 @@ public class GcsClient {
   }
 
   /**
+   * Get a placement group by name.
+   *
+   * @param name Name of the placement group.
+   * @param namespace The namespace of the placement group.
+   * @return The placement group.
+   */
+  public PlacementGroup getPlacementGroupInfo(String name, String namespace) {
+    byte[] result = globalStateAccessor.getPlacementGroupInfo(name, namespace);
+    return result == null ? null : PlacementGroupUtils.generatePlacementGroupFromByteArray(result);
+  }
+
+  /**
    * Get all placement groups in this cluster.
    *
    * @return All placement groups.
@@ -56,6 +64,11 @@ public class GcsClient {
       placementGroups.add(PlacementGroupUtils.generatePlacementGroupFromByteArray(result));
     }
     return placementGroups;
+  }
+
+  public String getInternalKV(String key) {
+    byte[] value = globalStateAccessor.getInternalKV(key);
+    return value == null ? null : new String(value);
   }
 
   public List<NodeInfo> getAllNodeInfo() {
@@ -98,17 +111,6 @@ public class GcsClient {
     return new ArrayList<>(nodes.values());
   }
 
-  public Map<String, String> getInternalConfig() {
-    Gcs.StoredConfig storedConfig;
-    byte[] conf = globalStateAccessor.getInternalConfig();
-    try {
-      storedConfig = Gcs.StoredConfig.parseFrom(conf);
-    } catch (InvalidProtocolBufferException e) {
-      throw new RuntimeException("Received invalid internal config protobuf from GCS.");
-    }
-    return storedConfig.getConfigMap();
-  }
-
   private Map<String, Double> getResourcesForClient(UniqueId clientId) {
     byte[] resourceMapBytes = globalStateAccessor.getNodeResourceInfo(clientId);
     Gcs.ResourceMap resourceMap;
@@ -131,8 +133,6 @@ public class GcsClient {
   }
 
   public boolean wasCurrentActorRestarted(ActorId actorId) {
-    byte[] key = ArrayUtils.addAll(TablePrefix.ACTOR.toString().getBytes(), actorId.getBytes());
-
     // TODO(ZhuSenlin): Get the actor table data from CoreWorker later.
     byte[] value = globalStateAccessor.getActorInfo(actorId);
     if (value == null) {
@@ -148,8 +148,19 @@ public class GcsClient {
   }
 
   public JobId nextJobId() {
-    int jobCounter = (int) primary.incr("JobCounter".getBytes());
-    return JobId.fromInt(jobCounter);
+    return JobId.fromBytes(globalStateAccessor.getNextJobID());
+  }
+
+  public GcsNodeInfo getNodeToConnectForDriver(String nodeIpAddress) {
+    byte[] value = globalStateAccessor.getNodeToConnectForDriver(nodeIpAddress);
+    Preconditions.checkNotNull(value);
+    GcsNodeInfo nodeInfo = null;
+    try {
+      nodeInfo = GcsNodeInfo.parseFrom(value);
+    } catch (InvalidProtocolBufferException e) {
+      throw new RuntimeException("Received invalid protobuf data from GCS.");
+    }
+    return nodeInfo;
   }
 
   /** Destroy global state accessor when ray native runtime will be shutdown. */

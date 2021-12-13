@@ -308,7 +308,7 @@ class MAMLLoss(object):
 
 
 def maml_loss(policy, model, dist_class, train_batch):
-    logits, state = model.from_batch(train_batch)
+    logits, state = model(train_batch)
     policy.cur_lr = policy.config["lr"]
 
     if policy.config["worker_index"]:
@@ -421,9 +421,9 @@ MAMLTFPolicy = build_tf_policy(
     loss_fn=maml_loss,
     stats_fn=maml_stats,
     optimizer_fn=maml_optimizer_fn,
-    extra_action_fetches_fn=vf_preds_fetches,
+    extra_action_out_fn=vf_preds_fetches,
     postprocess_fn=compute_gae_for_sample_batch,
-    gradients_fn=compute_and_clip_gradients,
+    compute_gradients_fn=compute_and_clip_gradients,
     before_init=setup_config,
     before_loss_init=setup_mixins,
     mixins=[KLCoeffMixin])

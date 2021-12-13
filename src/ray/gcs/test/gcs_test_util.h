@@ -18,33 +18,36 @@
 #include <utility>
 
 #include "gmock/gmock.h"
+#include "ray/common/asio/instrumented_io_context.h"
 #include "ray/common/bundle_spec.h"
 #include "ray/common/placement_group.h"
 #include "ray/common/task/task.h"
 #include "ray/common/task/task_util.h"
 #include "ray/common/test_util.h"
-#include "ray/util/asio_util.h"
 #include "src/ray/protobuf/gcs_service.grpc.pb.h"
 
 namespace ray {
 
 struct Mocker {
-  static TaskSpecification GenActorCreationTask(const JobID &job_id, int max_restarts,
-                                                bool detached, const std::string &name,
-                                                const rpc::Address &owner_address) {
+  static TaskSpecification GenActorCreationTask(
+      const JobID &job_id, int max_restarts, bool detached, const std::string &name,
+      const rpc::Address &owner_address,
+      std::unordered_map<std::string, double> required_resources =
+          std::unordered_map<std::string, double>(),
+      std::unordered_map<std::string, double> required_placement_resources =
+          std::unordered_map<std::string, double>()) {
     TaskSpecBuilder builder;
-    rpc::Address empty_address;
-    ray::FunctionDescriptor empty_descriptor =
-        ray::FunctionDescriptorBuilder::BuildPython("", "", "", "");
     auto actor_id = ActorID::Of(job_id, RandomTaskId(), 0);
     auto task_id = TaskID::ForActorCreationTask(actor_id);
-    auto resource = std::unordered_map<std::string, double>();
-    builder.SetCommonTaskSpec(task_id, name + ":" + empty_descriptor->CallString(),
-                              Language::PYTHON, empty_descriptor, job_id, TaskID::Nil(),
-                              0, TaskID::Nil(), owner_address, 1, resource, resource,
-                              std::make_pair(PlacementGroupID::Nil(), -1), true, "");
-    builder.SetActorCreationTaskSpec(actor_id, max_restarts, /*max_task_retries=*/0, {},
-                                     1, detached, name);
+    FunctionDescriptor function_descriptor;
+    function_descriptor = FunctionDescriptorBuilder::BuildPython("", "", "", "");
+    builder.SetCommonTaskSpec(task_id, name + ":" + function_descriptor->CallString(),
+                              Language::PYTHON, function_descriptor, job_id,
+                              TaskID::Nil(), 0, TaskID::Nil(), owner_address, 1,
+                              required_resources, required_placement_resources,
+                              std::make_pair(PlacementGroupID::Nil(), -1), true, "", 0);
+    builder.SetActorCreationTaskSpec(actor_id, {}, max_restarts,
+                                     /*max_task_retries=*/0, {}, 1, detached, name);
     return builder.Build();
   }
 
@@ -82,7 +85,7 @@ struct Mocker {
 
   static BundleSpecification GenBundleCreation(
       const PlacementGroupID &placement_group_id, const int bundle_index,
-      std::unordered_map<std::string, double> &unit_resource) {
+      absl::flat_hash_map<std::string, double> &unit_resource) {
     rpc::Bundle bundle;
     auto mutable_bundle_id = bundle.mutable_bundle_id();
     mutable_bundle_id->set_bundle_index(bundle_index);
@@ -101,8 +104,9 @@ struct Mocker {
     PlacementGroupSpecBuilder builder;
 
     auto placement_group_id = PlacementGroupID::FromRandom();
-    builder.SetPlacementGroupSpec(placement_group_id, name, bundles, strategy, job_id,
-                                  actor_id, /* is_creator_detached */ false);
+    builder.SetPlacementGroupSpec(placement_group_id, name, bundles, strategy,
+                                  /* is_detached */ false, job_id, actor_id,
+                                  /* is_creator_detached */ false);
     return builder.Build();
   }
 
@@ -137,7 +141,7 @@ struct Mocker {
     auto job_table_data = std::make_shared<rpc::JobTableData>();
     job_table_data->set_job_id(job_id.Binary());
     job_table_data->set_is_dead(false);
-    job_table_data->set_timestamp(std::time(nullptr));
+    job_table_data->set_timestamp(current_sys_time_ms());
     job_table_data->set_driver_ip_address("127.0.0.1");
     job_table_data->set_driver_pid(5667L);
     return job_table_data;
